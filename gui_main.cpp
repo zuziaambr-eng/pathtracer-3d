@@ -472,7 +472,6 @@ public:
     }
 };
 
-// Standardowy Path Tracer (Forward PT)
 Vec3 ray_color_standard(const Ray& r, const HittableList& world, int depth, std::mt19937& rng) {
     if (depth <= 0) return Vec3(0, 0, 0);
 
@@ -494,7 +493,6 @@ Vec3 ray_color_standard(const Ray& r, const HittableList& world, int depth, std:
     return emitted + attenuation * ray_color_standard(scattered, world, depth - 1, rng);
 }
 
-// Dwukierunkowy Path Tracer (BDPT + Globalna Siatka Fotonów Kaustyki)
 Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<Sphere>& light_sources,
                     const PhotonMap& photon_map, int depth, std::mt19937& rng) {
     Vec3 accumulated_color(0.0f, 0.0f, 0.0f);
@@ -528,7 +526,6 @@ Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<S
 
         bool is_spec = rec.mat->is_specular();
 
-        // 1. Direct Next Event Estimation
         if (!is_spec && !light_sources.empty()) {
             const auto& light = light_sources[0];
             Vec3 light_pt = light.center + light.radius * random_unit_vector(rng);
@@ -554,7 +551,6 @@ Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<S
             }
         }
 
-        // 2. Kaustyka z Globalnej Mapy Fotonów
         if (!is_spec && !photon_map.photons.empty()) {
             Vec3 caustic_flux = photon_map.estimate_radiance(rec.p, rec.normal, 0.12f);
             accumulated_color = accumulated_color + throughput * albedo * caustic_flux;
@@ -587,18 +583,16 @@ struct Tile {
 struct EditableSceneObject {
     std::wstring name;
     Vec3 center;
-    float radius;          // Promień lub skala kryształu
-    float secondary_param; // Wysokość kryształu
+    float radius;
+    float secondary_param;
     bool is_crystal = false;
     std::shared_ptr<Material> material;
 };
 
-// Rozmiar kanwy podglądu (dynamicznie dopasowywany przy maksymalizacji!)
 int g_canvas_view_width  = 800;
 int g_canvas_view_height = 450;
 constexpr int TIMER_UPDATE_ID = 101;
 
-// Identyfikatory kontrolek
 constexpr int IDC_BTN_RENDER     = 1001;
 constexpr int IDC_BTN_STOP       = 1002;
 constexpr int IDC_BTN_SAVE_PNG   = 1003;
@@ -622,26 +616,26 @@ constexpr int IDC_EDIT_FILENAME  = 1020;
 constexpr int IDC_BTN_GRAB       = 1021;
 constexpr int IDC_BTN_RESET_CAM  = 1022;
 
-// Aktualne parametry renderowania Path Tracer
 int g_render_width   = 800;
 int g_render_height  = 450;
 int g_tile_size      = 32;
 int g_render_algo    = 1;
 int g_photon_count   = 50000;
 
-// Bufory obrazu
-std::vector<uint32_t> g_display_buffer;
-std::vector<Vec3>     g_raw_image;
-std::vector<int>      g_sample_counts;
+// Dokładne śledzenie wymiarów bufora w pamięci zapobiegające rozjeżdżaniu skanlinii DIB!
+std::atomic<int> g_cur_buf_w(800);
+std::atomic<int> g_cur_buf_h(450);
 
-// Flagi renderowania
+std::vector<uint32_t> g_display_buffer(800 * 450, 0xFF18181B);
+std::vector<Vec3>     g_raw_image(800 * 450, Vec3(0, 0, 0));
+std::vector<int>      g_sample_counts(800 * 450, 0);
+
 std::atomic<bool>   g_is_rendering(false);
 std::atomic<bool>   g_cancel_render(false);
 std::atomic<size_t> g_completed_tiles(0);
 size_t              g_total_tiles = 0;
 std::chrono::high_resolution_clock::time_point g_render_start_time;
 
-// Obiekty sceny
 std::vector<EditableSceneObject> g_scene_objects = {
     { L"1. Krysztal Szklany (Faceted Crystal)", Vec3(-0.5f, 0.70f, 0.1f), 0.65f, 1.40f, true,  std::make_shared<Dielectric>(1.55f) },
     { L"2. Zrodlo Swiatla (Kat boczno-tylny)",   Vec3(3.2f, 2.4f, -1.2f),   0.85f, 0.0f,  false, std::make_shared<DiffuseLight>(Vec3(35.0f, 32.0f, 28.0f)) },
@@ -661,14 +655,12 @@ enum AxisLock {
     AXIS_Z
 };
 
-// Kamera sferyczna do orbitowania
 Vec3  g_cam_target(-0.3f, 0.5f, 0.0f);
 float g_cam_distance = 4.6f;
-float g_cam_yaw      = 0.05f;  // radians
-float g_cam_pitch    = 0.45f;  // radians (~26 degrees)
+float g_cam_yaw      = 0.05f;
+float g_cam_pitch    = 0.45f;
 float g_cam_fov      = 38.0f;
 
-// Stan interakcji 3D
 int      g_selected_object_idx = 0;
 bool     g_is_grabbing         = false;
 bool     g_is_scaling          = false;
@@ -685,7 +677,6 @@ Vec3     g_grab_plane_normal;
 Vec3     g_grab_plane_point;
 AxisLock g_axis_lock           = AXIS_NONE;
 
-// Uchwyty okna i kontrolek
 HWND g_hWnd          = nullptr;
 HWND g_hCanvas       = nullptr;
 HWND g_hGroupRender  = nullptr;
@@ -731,8 +722,8 @@ HWND g_hBtnSave      = nullptr;
 HWND g_hProgressBar  = nullptr;
 HWND g_hStatusLabel  = nullptr;
 
-Camera GetCurrentCamera() {
-    float aspect_ratio = static_cast<float>(g_canvas_view_width) / static_cast<float>(std::max(1, g_canvas_view_height));
+Camera GetCameraForRender(int width, int height) {
+    float aspect_ratio = static_cast<float>(width) / static_cast<float>(std::max(1, height));
 
     float cy = std::cos(g_cam_yaw);
     float sy = std::sin(g_cam_yaw);
@@ -749,7 +740,10 @@ Camera GetCurrentCamera() {
     return Camera(lookfrom, g_cam_target, vup, g_cam_fov, aspect_ratio);
 }
 
-// Dokładne rzutowanie 3D na ekran 2D (TOP-DOWN: sy = 0 to góra ekranu!)
+Camera GetCurrentCamera() {
+    return GetCameraForRender(g_canvas_view_width, g_canvas_view_height);
+}
+
 bool ProjectToScreen(const Vec3& p, const Camera& cam, float viewport_w, float viewport_h,
                      int screen_w, int screen_h, int& out_x, int& out_y) {
     Vec3 v = p - cam.origin;
@@ -767,17 +761,14 @@ bool ProjectToScreen(const Vec3& p, const Camera& cam, float viewport_w, float v
     float v_norm = 0.5f + py / viewport_h;
 
     out_x = static_cast<int>(u * static_cast<float>(screen_w));
-    // Poprawne rzutowanie TOP-DOWN: v_norm = 1.0 (góra) -> out_y = 0 (góra okna)
     out_y = static_cast<int>((1.0f - v_norm) * static_cast<float>(screen_h));
     return (out_x >= -300 && out_x <= screen_w + 300 && out_y >= -300 && out_y <= screen_h + 300);
 }
 
-// Ray Picking: Wykrywanie klikniętego obiektu z pozycji kursora myszki
 int RayPickObject(int mx, int my) {
     if (mx < 0 || mx >= g_canvas_view_width || my < 0 || my >= g_canvas_view_height) return -1;
     Camera cam = GetCurrentCamera();
 
-    // Poprawne TOP-DOWN: my = 0 (góra) -> v = 1.0 (góra widoku kamery)
     float u = (static_cast<float>(mx) + 0.5f) / static_cast<float>(g_canvas_view_width);
     float v = (static_cast<float>(g_canvas_view_height - 1 - my) + 0.5f) / static_cast<float>(g_canvas_view_height);
     Ray r = cam.get_ray(u, v);
@@ -806,7 +797,6 @@ int RayPickObject(int mx, int my) {
     return best_idx;
 }
 
-// Szybki podgląd 3D sceny w czasie rzeczywistym (TOP-DOWN, bez odwracania obrazu)
 void RenderFastPreview() {
     if (g_is_rendering.load()) return;
 
@@ -826,7 +816,6 @@ void RenderFastPreview() {
             world.add(std::make_shared<Sphere>(obj.center, obj.radius, obj.material));
         }
     }
-    // Podłoże
     world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
                                        std::make_shared<Lambertian>(Vec3(0.85f, 0.85f, 0.88f))));
 
@@ -836,7 +825,6 @@ void RenderFastPreview() {
     }
 
     for (int py = 0; py < ph; ++py) {
-        // TOP-DOWN: py = 0 to GÓRA ekranu -> v = 1.0 (niebo), py = ph - 1 to DÓŁ ekranu -> v = 0.0 (podłoga)
         float v = (static_cast<float>(ph - 1 - py) + 0.5f) / static_cast<float>(ph);
         int row_offset = py * pw;
 
@@ -864,14 +852,12 @@ void RenderFastPreview() {
                 } else {
                     col = rec.mat->get_albedo() * diff;
 
-                    // Siatka podłoża w stylu Blendera (Floor Grid)
                     if (g_show_floor_grid && std::fabs(rec.p.y) < 0.05f) {
                         float fx = std::fabs(rec.p.x - std::round(rec.p.x));
                         float fz = std::fabs(rec.p.z - std::round(rec.p.z));
                         if (fx < 0.035f || fz < 0.035f) {
                             col = col * 0.82f + Vec3(0.40f, 0.45f, 0.55f) * 0.35f;
                         }
-                        // Kolorowe osie na podłodze: Czerwona dla Z=0 (oś X), Niebieska dla X=0 (oś Z)
                         if (std::fabs(rec.p.z) < 0.045f && std::fabs(rec.p.x) < 8.0f) {
                             col = Vec3(0.85f, 0.25f, 0.25f);
                         } else if (std::fabs(rec.p.x) < 0.045f && std::fabs(rec.p.z) < 8.0f) {
@@ -897,11 +883,10 @@ void RenderFastPreview() {
         }
     }
 
-    if (static_cast<int>(g_display_buffer.size()) != g_canvas_view_width * g_canvas_view_height) {
-        g_display_buffer.resize(g_canvas_view_width * g_canvas_view_height);
-    }
+    g_display_buffer.assign(g_canvas_view_width * g_canvas_view_height, 0xFF18181B);
+    g_cur_buf_w.store(g_canvas_view_width);
+    g_cur_buf_h.store(g_canvas_view_height);
 
-    // Skalowanie 2x do pełnego rozmiaru kanwy (TOP-DOWN)
     for (int y = 0; y < g_canvas_view_height; ++y) {
         int sy = y / 2;
         if (sy >= ph) sy = ph - 1;
@@ -1016,7 +1001,6 @@ void ProcessGrabMove(int mx, int my) {
     if (!g_is_grabbing) return;
 
     Camera cam = GetCurrentCamera();
-    // TOP-DOWN: my = 0 (góra) -> v = 1.0 (góra)
     float u = (static_cast<float>(mx) + 0.5f) / static_cast<float>(g_canvas_view_width);
     float v = (static_cast<float>(g_canvas_view_height - 1 - my) + 0.5f) / static_cast<float>(g_canvas_view_height);
     Ray r = cam.get_ray(u, v);
@@ -1047,7 +1031,6 @@ void ProcessGrabMove(int mx, int my) {
     }
 }
 
-// Skalowanie obiektu w stylu Blendera (Klawisz S)
 void StartScaleMode() {
     if (g_selected_object_idx < 0 || g_selected_object_idx >= static_cast<int>(g_scene_objects.size())) return;
     if (g_is_rendering.load()) return;
@@ -1230,6 +1213,9 @@ void StartRendering() {
     if (photons > 1000000) photons = 1000000;
     g_photon_count = photons;
 
+    // Ustawienie dokładnych wymiarów bufora w pamięci dla renderera
+    g_cur_buf_w.store(g_render_width);
+    g_cur_buf_h.store(g_render_height);
     g_display_buffer.assign(g_render_width * g_render_height, 0xFF18181B);
     g_raw_image.assign(g_render_width * g_render_height, Vec3(0, 0, 0));
     g_sample_counts.assign(g_render_width * g_render_height, 0);
@@ -1300,7 +1286,8 @@ void StartRendering() {
             }
         }
 
-        Camera cam = GetCurrentCamera();
+        // Dokładna kamera dla wybranej rozdzielczości renderowania
+        Camera cam = GetCameraForRender(g_render_width, g_render_height);
 
         PhotonMap photon_map;
         if (algo == 1 && glass_crystal && !light_sources.empty()) {
@@ -1429,9 +1416,9 @@ void StartRendering() {
                             int px = tile.x0 + off.first;
                             int py = tile.y0 + off.second;
 
-                            // TOP-DOWN zgodne z DIB: py = 0 (góra) -> v = 1.0 (góra widoku)
-                            float u = (static_cast<float>(px) + dist01(rng)) / static_cast<float>(g_render_width - 1);
-                            float v = (static_cast<float>(g_render_height - 1 - py) + dist01(rng)) / static_cast<float>(g_render_height - 1);
+                            // Precyzyjny TOP-DOWN raytracing zgodny z buforem
+                            float u = (static_cast<float>(px) + dist01(rng)) / static_cast<float>(g_render_width);
+                            float v = (static_cast<float>(g_render_height - 1 - py) + dist01(rng)) / static_cast<float>(g_render_height);
 
                             Ray r = cam.get_ray(u, v);
                             Vec3 col;
@@ -1543,7 +1530,6 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
             int my = HIWORD(lParam);
             SetFocus(hWnd);
 
-            // Alt + LPM: Obrót kamery (Orbit)
             if (GetKeyState(VK_MENU) < 0) {
                 if (GetKeyState(VK_SHIFT) < 0) {
                     g_is_panning = true;
@@ -1747,12 +1733,53 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
-            // 1. Podgląd bufora 3D (TOP-DOWN DIB: biHeight ujemna zapobiega odwróceniu obrazu!)
-            if (!g_display_buffer.empty()) {
+            int bufW = g_cur_buf_w.load();
+            int bufH = g_cur_buf_h.load();
+
+            if (bufW > 0 && bufH > 0 && g_display_buffer.size() >= static_cast<size_t>(bufW * bufH)) {
+                int destX = 0, destY = 0;
+                int destW = g_canvas_view_width;
+                int destH = g_canvas_view_height;
+
+                // Centrowanie i zachowanie proporcji kadru dla aktywnego renderu Path Tracer
+                if (g_is_rendering.load() || bufW != g_canvas_view_width || bufH != g_canvas_view_height) {
+                    float canvasAspect = static_cast<float>(g_canvas_view_width) / static_cast<float>(std::max(1, g_canvas_view_height));
+                    float bufAspect = static_cast<float>(bufW) / static_cast<float>(bufH);
+
+                    if (canvasAspect > bufAspect) {
+                        destH = g_canvas_view_height;
+                        destW = static_cast<int>(destH * bufAspect);
+                        destX = (g_canvas_view_width - destW) / 2;
+                        destY = 0;
+                    } else {
+                        destW = g_canvas_view_width;
+                        destH = static_cast<int>(destW / bufAspect);
+                        destX = 0;
+                        destY = (g_canvas_view_height - destH) / 2;
+                    }
+
+                    if (destX > 0 || destY > 0) {
+                        HBRUSH hBg = CreateSolidBrush(RGB(18, 18, 22));
+                        if (destX > 0) {
+                            RECT rLeft = {0, 0, destX, g_canvas_view_height};
+                            RECT rRight = {destX + destW, 0, g_canvas_view_width, g_canvas_view_height};
+                            FillRect(hdc, &rLeft, hBg);
+                            FillRect(hdc, &rRight, hBg);
+                        }
+                        if (destY > 0) {
+                            RECT rTop = {0, 0, g_canvas_view_width, destY};
+                            RECT rBottom = {0, destY + destH, g_canvas_view_width, g_canvas_view_height};
+                            FillRect(hdc, &rTop, hBg);
+                            FillRect(hdc, &rBottom, hBg);
+                        }
+                        DeleteObject(hBg);
+                    }
+                }
+
                 BITMAPINFO bmi = {};
                 bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                bmi.bmiHeader.biWidth = g_canvas_view_width;
-                bmi.bmiHeader.biHeight = -g_canvas_view_height; // UJEMNA = Top-Down DIB (PRAWIDŁOWA ORIENTACJA)
+                bmi.bmiHeader.biWidth = bufW;
+                bmi.bmiHeader.biHeight = -bufH; // Top-Down DIB zgodny ze skanliniami bufora
                 bmi.bmiHeader.biPlanes = 1;
                 bmi.bmiHeader.biBitCount = 32;
                 bmi.bmiHeader.biCompression = BI_RGB;
@@ -1762,8 +1789,8 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 
                 StretchDIBits(
                     hdc,
-                    0, 0, g_canvas_view_width, g_canvas_view_height,
-                    0, 0, g_canvas_view_width, g_canvas_view_height,
+                    destX, destY, destW, destH,
+                    0, 0, bufW, bufH,
                     g_display_buffer.data(),
                     &bmi,
                     DIB_RGB_COLORS,
@@ -1821,7 +1848,6 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                         }
                     }
 
-                    // Pierścień zaznaczenia obiektu w stylu Blendera
                     COLORREF ringColor = RGB(255, 140, 0);
                     if (g_is_grabbing) ringColor = RGB(255, 230, 20);
                     else if (g_is_scaling) ringColor = RGB(80, 220, 255);
@@ -1875,7 +1901,6 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 
                 DrawTextW(hdc, hudText, -1, &hudRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
-                // Górna etykieta trybu widoku
                 RECT topRect = { 10, 8, 380, 28 };
                 HBRUSH hTopBg = CreateSolidBrush(RGB(20, 24, 32));
                 FillRect(hdc, &topRect, hTopBg);
@@ -1923,7 +1948,6 @@ void ResizeLayout(int clientW, int clientH) {
         MoveWindow(g_hStatusLabel, 15, canvasH + 44, clientW - 30, 24, TRUE);
     }
 
-    // Pozycjonowanie prawego panelu
     int curY = 15;
     if (g_hGroupRender) MoveWindow(g_hGroupRender, sideX, curY, panelW, 240, TRUE);
 
@@ -1996,7 +2020,10 @@ void ResizeLayout(int clientW, int clientH) {
     curY += 26;
     if (g_hBtnSave) MoveWindow(g_hBtnSave, sideX + 15, curY, 350, 30, TRUE);
 
-    RenderFastPreview();
+    // Renderujemy szybki podgląd tylko jeśli renderowanie PT nie trwa w tle!
+    if (!g_is_rendering.load()) {
+        RenderFastPreview();
+    }
     if (g_hCanvas) InvalidateRect(g_hCanvas, NULL, FALSE);
 }
 
@@ -2025,7 +2052,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int sideX = 835;
             int curY = 15;
 
-            // --- GRUPA 1: PARAMETRY RENDEROWANIA & KAUSTYKA ---
             g_hGroupRender = CreateWindowW(L"BUTTON", L" Parametry renderowania & Kaustyka ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 sideX, curY, 380, 240, hWnd, nullptr, nullptr, nullptr);
@@ -2113,7 +2139,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             curY += 50;
 
-            // --- GRUPA 2: PRZESUWANIE PRZEDMIOTÓW (BLENDER 3D) ---
             g_hGroupObj = CreateWindowW(L"BUTTON", L" Przesuwanie przedmiotow (Blender 3D) ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 sideX, curY, 380, 200, hWnd, nullptr, nullptr, nullptr);
@@ -2172,7 +2197,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             curY += 34;
 
-            // --- GRUPA 3: ZAPIS DO PLIKU PNG ---
             g_hGroupSave = CreateWindowW(L"BUTTON", L" Zapis obrazu do pliku PNG ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 sideX, curY, 380, 85, hWnd, nullptr, nullptr, nullptr);
@@ -2334,11 +2358,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int winWidth  = 1265;
     int winHeight = 615;
 
-    // Pełne wsparcie maksymalizacji, minimalizacji i płynnego rozszerzania okna:
     g_hWnd = CreateWindowW(
         L"PathTracerMainWindow",
         L"Path Tracer 3D - Interaktywny Blender 3D Viewport, Szlifowany Krysztal & BDPT",
-        WS_OVERLAPPEDWINDOW, // WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+        WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         winWidth, winHeight,
         nullptr, nullptr, hInstance, nullptr
