@@ -192,6 +192,7 @@ public:
     Vec3 emit_color;
     explicit DiffuseLight(const Vec3& c) : emit_color(c) {}
     Vec3 emitted(const Vec3& p) const override { return emit_color; }
+    Vec3 get_albedo() const override { return emit_color; }
 };
 
 // ============================================================================
@@ -244,7 +245,7 @@ struct PolyPlane {
     float d;
 };
 
-// Szlifowany Kryształ / Wielościan Wypukły (Slab Method - analytical exact clipping)
+// Szlifowany Kryształ / Wielościan Wypukły (Slab Method - analityczne obcinanie półprzestrzeni)
 class ConvexPolyhedron : public Hittable {
 public:
     Vec3 center;
@@ -328,7 +329,7 @@ std::shared_ptr<ConvexPolyhedron> CreateFacetedCrystal(const Vec3& center, float
         crystal->add_plane(Vec3(std::cos(angle), 0.0f, std::sin(angle)), radius);
     }
 
-    // 3. Sześć ukośnych faset wierzchołkowych (tworzących szlif diamentowy / ostrosłup kwarcu)
+    // 3. Sześć ukośnych faset wierzchołkowych (szlif diamentowy / ostrosłup kwarcu)
     for (int i = 0; i < 6; ++i) {
         float angle = (i + 0.5f) * (3.14159265f / 3.0f);
         Vec3 slanted_norm = unit_vector(Vec3(std::cos(angle) * 0.85f, 1.15f, std::sin(angle) * 0.85f));
@@ -377,8 +378,14 @@ public:
     Vec3 lower_left_corner;
     Vec3 horizontal;
     Vec3 vertical;
+    Vec3 lookat;
+    Vec3 vup;
 
-    Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov_deg, float aspect_ratio) {
+    Camera() = default;
+
+    Camera(Vec3 lookfrom, Vec3 lookat_in, Vec3 vup_in, float vfov_deg, float aspect_ratio) {
+        lookat = lookat_in;
+        vup = vup_in;
         float theta = vfov_deg * 3.14159265358979323846f / 180.0f;
         float h = std::tan(theta / 2.0f);
         float viewport_height = 2.0f * h;
@@ -400,7 +407,7 @@ public:
 };
 
 // ============================================================================
-// 3. GLOBALNA MAPA FOTONÓW KAUSTYKI (Eliminacja kratkowanego kafelkowania)
+// 3. GLOBALNA MAPA FOTONÓW KAUSTYKI (Eliminacja szwów kafelkowania)
 // ============================================================================
 
 struct Photon {
@@ -514,7 +521,6 @@ Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<S
             break;
         }
 
-        // Źródło światła widoczne bezpośrednio lub w odbiciu lustrzanym/szklanym
         Vec3 emitted = rec.mat->emitted(rec.p);
         if (!emitted.near_zero()) {
             if (last_was_specular) {
@@ -531,7 +537,7 @@ Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<S
 
         bool is_spec = rec.mat->is_specular();
 
-        // 1. Oświetlenie bezpośrednie (Next Event Estimation) dla powierzchni matowych
+        // 1. Direct Next Event Estimation
         if (!is_spec && !light_sources.empty()) {
             const auto& light = light_sources[0];
             Vec3 light_pt = light.center + light.radius * random_unit_vector(rng);
@@ -557,7 +563,7 @@ Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<S
             }
         }
 
-        // 2. Precyzyjna kaustyka z Globalnej Mapy Fotonów (Spójna, bez szwów kafelkowania!)
+        // 2. Kaustyka z Globalnej Mapy Fotonów
         if (!is_spec && !photon_map.photons.empty()) {
             Vec3 caustic_flux = photon_map.estimate_radiance(rec.p, rec.normal, 0.12f);
             accumulated_color = accumulated_color + throughput * albedo * caustic_flux;
@@ -567,7 +573,6 @@ Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<S
         current_ray = scattered;
         last_was_specular = is_spec;
 
-        // Rosyjska ruletka od 3 odbicia
         if (bounce > 3) {
             float p = std::fmax(throughput.x, std::fmax(throughput.y, throughput.z));
             std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
@@ -622,16 +627,17 @@ constexpr int IDC_EDIT_DEPTH     = 1017;
 constexpr int IDC_COMBO_ALGO     = 1018;
 constexpr int IDC_EDIT_PHOTONS   = 1019;
 constexpr int IDC_EDIT_FILENAME  = 1020;
+constexpr int IDC_BTN_GRAB       = 1021;
 
 // Aktualne parametry renderowania
 int g_render_width   = 800;
 int g_render_height  = 450;
 int g_tile_size      = 32;
-int g_render_algo    = 1;     // Domyślnie BDPT + Globalna Mapa Fotonów
-int g_photon_count   = 50000; // Konfigurowalna ilość fotonów
+int g_render_algo    = 1;
+int g_photon_count   = 50000;
 
 // Bufory obrazu
-std::vector<uint32_t> g_display_buffer(g_render_width * g_render_height, 0xFF18181B);
+std::vector<uint32_t> g_display_buffer(CANVAS_VIEW_WIDTH * CANVAS_VIEW_HEIGHT, 0xFF18181B);
 std::vector<Vec3>     g_raw_image(g_render_width * g_render_height, Vec3(0, 0, 0));
 std::vector<int>      g_sample_counts(g_render_width * g_render_height, 0);
 
@@ -642,19 +648,34 @@ std::atomic<size_t> g_completed_tiles(0);
 size_t              g_total_tiles = 0;
 std::chrono::high_resolution_clock::time_point g_render_start_time;
 
-// Obiekty sceny ze SZLIFOWANYM KRYSZTAŁEM i nowym dramatycznym kątem światła
+// Obiekty sceny ze SZLIFOWANYM KRYSZTAŁEM i dramatycznym kątem światła
 std::vector<EditableSceneObject> g_scene_objects = {
-    // 0: Szlifowany kryształ heksagonalny o 20 geometrycznych fasetach generujący zbieżne promienie kaustyczne
     { L"1. Krysztal Szklany (Faceted Crystal)", Vec3(-0.5f, 0.70f, 0.1f), 0.65f, 1.40f, true,  std::make_shared<Dielectric>(1.55f) },
-    // 1: Jasne źródło światła pod niskim kątem bocznym (rzucające długie, ostre wzory kaustyczne przed kamerę)
     { L"2. Zrodlo Swiatla (Kat boczno-tylny)",   Vec3(3.2f, 2.4f, -1.2f),   0.85f, 0.0f,  false, std::make_shared<DiffuseLight>(Vec3(35.0f, 32.0f, 28.0f)) },
-    // 2: Polerowana złota kula po prawej stronie sceny odbijająca krysztal i kaustykę
     { L"3. Kula Zlota (Prawa)",                 Vec3(1.7f, 0.80f, 0.6f),   0.80f, 0.0f,  false, std::make_shared<Metal>(Vec3(0.95f, 0.78f, 0.35f), 0.02f) },
-    // 3: Karminowa matowa kula w tle po lewej
     { L"4. Kula Rubinowa (Lewa-Tyl)",           Vec3(-2.0f, 0.65f, -0.6f), 0.65f, 0.0f,  false, std::make_shared<Lambertian>(Vec3(0.85f, 0.15f, 0.15f)) },
-    // 4: Chromowana mała kulka z przodu
     { L"5. Kula Chromowana (Przod)",            Vec3(0.7f, 0.35f, 1.7f),   0.35f, 0.0f,  false, std::make_shared<Metal>(Vec3(0.92f, 0.95f, 0.98f), 0.05f) }
 };
+
+// ============================================================================
+// 5. BLENDER-STYLE INTERACTIVE 3D VIEWPORT & GRAB (G) SYSTEM
+// ============================================================================
+
+enum AxisLock {
+    AXIS_NONE = 0,
+    AXIS_X,
+    AXIS_Y,
+    AXIS_Z
+};
+
+int      g_selected_object_idx = 0; // Domyślnie wybrany obiekt 0 (kryształ)
+bool     g_is_grabbing         = false;
+Vec3     g_grab_initial_pos;
+POINT    g_grab_start_mouse    = {0, 0};
+Vec3     g_grab_plane_hit0;
+Vec3     g_grab_plane_normal;
+Vec3     g_grab_plane_point;
+AxisLock g_axis_lock           = AXIS_NONE;
 
 // Uchwyty okna
 HWND g_hWnd          = nullptr;
@@ -676,13 +697,162 @@ HWND g_hEditPosY     = nullptr;
 HWND g_hEditPosZ     = nullptr;
 HWND g_hEditRadius   = nullptr;
 HWND g_hBtnApplyPos  = nullptr;
+HWND g_hBtnGrab      = nullptr;
 HWND g_hEditFilename = nullptr;
 HWND g_hProgressBar  = nullptr;
 HWND g_hStatusLabel  = nullptr;
 
-// ============================================================================
-// 5. FUNKCJE POMOCNICZE GUI
-// ============================================================================
+Camera GetCurrentCamera() {
+    const float aspect_ratio = static_cast<float>(CANVAS_VIEW_WIDTH) / static_cast<float>(CANVAS_VIEW_HEIGHT);
+    Vec3 lookfrom(0.2f, 2.5f, 4.3f);
+    Vec3 lookat(-0.3f, 0.5f, 0.0f);
+    Vec3 vup(0.0f, 1.0f, 0.0f);
+    float vfov = 38.0f;
+    return Camera(lookfrom, lookat, vup, vfov, aspect_ratio);
+}
+
+// Rzutowanie współrzędnych 3D na ekran 2D kanwy
+bool ProjectToScreen(const Vec3& p, const Camera& cam, float viewport_w, float viewport_h,
+                     int screen_w, int screen_h, int& out_x, int& out_y) {
+    Vec3 v = p - cam.origin;
+    Vec3 w_dir = unit_vector(cam.lower_left_corner + cam.horizontal * 0.5f + cam.vertical * 0.5f - cam.origin);
+    float dz = dot(v, w_dir);
+    if (dz <= 0.1f) return false;
+
+    Vec3 u_dir = unit_vector(cam.horizontal);
+    Vec3 v_dir = unit_vector(cam.vertical);
+
+    float px = dot(v, u_dir) / dz;
+    float py = dot(v, v_dir) / dz;
+
+    float u = 0.5f + px / viewport_w;
+    float v_norm = 0.5f + py / viewport_h;
+
+    out_x = static_cast<int>(u * static_cast<float>(screen_w));
+    out_y = static_cast<int>((1.0f - v_norm) * static_cast<float>(screen_h));
+    return (out_x >= -200 && out_x <= screen_w + 200 && out_y >= -200 && out_y <= screen_h + 200);
+}
+
+// Ray Picking: Wykrywanie klikniętego obiektu z pozycji kursora myszki
+int RayPickObject(int mx, int my) {
+    if (mx < 0 || mx >= CANVAS_VIEW_WIDTH || my < 0 || my >= CANVAS_VIEW_HEIGHT) return -1;
+    Camera cam = GetCurrentCamera();
+    float u = (static_cast<float>(mx) + 0.5f) / static_cast<float>(CANVAS_VIEW_WIDTH);
+    float v = (static_cast<float>(CANVAS_VIEW_HEIGHT - 1 - my) + 0.5f) / static_cast<float>(CANVAS_VIEW_HEIGHT);
+    Ray r = cam.get_ray(u, v);
+
+    int best_idx = -1;
+    float closest_t = 1e9f;
+
+    for (int i = 0; i < static_cast<int>(g_scene_objects.size()); ++i) {
+        const auto& obj = g_scene_objects[i];
+        HitRecord rec;
+        if (obj.is_crystal) {
+            float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
+            auto crystal = CreateFacetedCrystal(obj.center, obj.radius, h, obj.material);
+            if (crystal->hit(r, 0.001f, closest_t, rec)) {
+                closest_t = rec.t;
+                best_idx = i;
+            }
+        } else {
+            Sphere s(obj.center, obj.radius, obj.material);
+            if (s.hit(r, 0.001f, closest_t, rec)) {
+                closest_t = rec.t;
+                best_idx = i;
+            }
+        }
+    }
+    return best_idx;
+}
+
+// Błyskawiczny podgląd 3D sceny w czasie rzeczywistym (60+ FPS)
+void RenderFastPreview() {
+    if (g_is_rendering.load()) return;
+
+    Camera cam = GetCurrentCamera();
+    constexpr int PW = 400;
+    constexpr int PH = 225;
+
+    std::vector<uint32_t> small_buf(PW * PH);
+
+    HittableList world;
+    for (int i = 0; i < static_cast<int>(g_scene_objects.size()); ++i) {
+        const auto& obj = g_scene_objects[i];
+        if (obj.is_crystal) {
+            float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
+            world.add(CreateFacetedCrystal(obj.center, obj.radius, h, obj.material));
+        } else {
+            world.add(std::make_shared<Sphere>(obj.center, obj.radius, obj.material));
+        }
+    }
+    // Podłoże
+    world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
+                                       std::make_shared<Lambertian>(Vec3(0.85f, 0.85f, 0.88f))));
+
+    Vec3 light_pos(3.2f, 2.4f, -1.2f);
+    if (g_scene_objects.size() > 1) {
+        light_pos = g_scene_objects[1].center;
+    }
+
+    for (int py = 0; py < PH; ++py) {
+        for (int px = 0; px < PW; ++px) {
+            float u = (static_cast<float>(px) + 0.5f) / static_cast<float>(PW);
+            float v = (static_cast<float>(PH - 1 - py) + 0.5f) / static_cast<float>(PH);
+            Ray r = cam.get_ray(u, v);
+
+            HitRecord rec;
+            Vec3 col;
+            if (world.hit(r, 0.001f, 1e9f, rec)) {
+                Vec3 to_light = light_pos - rec.p;
+                float dist_l = to_light.length();
+                Vec3 dir_l = to_light / dist_l;
+                float diff = std::fmax(0.15f, dot(rec.normal, dir_l));
+
+                if (!rec.mat->emitted(rec.p).near_zero()) {
+                    col = Vec3(1.0f, 0.95f, 0.85f);
+                } else if (rec.mat->is_dielectric()) {
+                    float rim = std::pow(1.0f - std::fabs(dot(rec.normal, -unit_vector(r.direction))), 2.5f);
+                    col = Vec3(0.12f, 0.18f, 0.28f) + Vec3(0.85f, 0.95f, 1.0f) * (rim * 0.9f);
+                } else if (rec.mat->is_specular()) {
+                    Vec3 refl = reflect(unit_vector(r.direction), rec.normal);
+                    float spec = std::pow(std::fmax(0.0f, dot(refl, dir_l)), 16.0f);
+                    col = rec.mat->get_albedo() * diff + Vec3(1.0f, 1.0f, 1.0f) * (spec * 0.6f);
+                } else {
+                    col = rec.mat->get_albedo() * diff;
+                }
+            } else {
+                Vec3 unit_dir = unit_vector(r.direction);
+                float a = 0.5f * (unit_dir.y + 1.0f);
+                col = (1.0f - a) * Vec3(0.06f, 0.08f, 0.12f) + a * Vec3(0.18f, 0.22f, 0.32f);
+            }
+
+            float cr = std::clamp(std::sqrt(col.x), 0.0f, 0.999f);
+            float cg = std::clamp(std::sqrt(col.y), 0.0f, 0.999f);
+            float cb = std::clamp(std::sqrt(col.z), 0.0f, 0.999f);
+
+            uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+            uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+            uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+
+            small_buf[py * PW + px] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
+        }
+    }
+
+    if (g_display_buffer.size() != CANVAS_VIEW_WIDTH * CANVAS_VIEW_HEIGHT) {
+        g_display_buffer.resize(CANVAS_VIEW_WIDTH * CANVAS_VIEW_HEIGHT);
+    }
+    for (int y = 0; y < CANVAS_VIEW_HEIGHT; ++y) {
+        int sy = y / 2;
+        if (sy >= PH) sy = PH - 1;
+        int row_dst = y * CANVAS_VIEW_WIDTH;
+        int row_src = sy * PW;
+        for (int x = 0; x < CANVAS_VIEW_WIDTH; ++x) {
+            int sx = x / 2;
+            if (sx >= PW) sx = PW - 1;
+            g_display_buffer[row_dst + x] = small_buf[row_src + sx];
+        }
+    }
+}
 
 void UpdateObjectFieldsFromSelection(int index) {
     if (index < 0 || index >= static_cast<int>(g_scene_objects.size())) return;
@@ -700,6 +870,118 @@ void UpdateObjectFieldsFromSelection(int index) {
 
     swprintf(buf, 64, L"%.2f", obj.radius);
     SetWindowTextW(g_hEditRadius, buf);
+}
+
+void StartGrabMode() {
+    if (g_selected_object_idx < 0 || g_selected_object_idx >= static_cast<int>(g_scene_objects.size())) {
+        SetWindowTextW(g_hStatusLabel, L"Najpierw kliknij obiekt lewym przyciskiem myszy (LPM), aby go wybrac!");
+        return;
+    }
+    if (g_is_rendering.load()) {
+        SetWindowTextW(g_hStatusLabel, L"Renderowanie jest w toku! Kliknij 'Przerwij', aby edytowac pozycje.");
+        return;
+    }
+
+    g_is_grabbing = true;
+    g_grab_initial_pos = g_scene_objects[g_selected_object_idx].center;
+    g_axis_lock = AXIS_NONE;
+
+    Camera cam = GetCurrentCamera();
+    g_grab_plane_point = g_grab_initial_pos;
+    g_grab_plane_normal = unit_vector(cam.origin - cam.lookat);
+
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(g_hCanvas, &pt);
+    g_grab_start_mouse = pt;
+
+    float u0 = (static_cast<float>(pt.x) + 0.5f) / static_cast<float>(CANVAS_VIEW_WIDTH);
+    float v0 = (static_cast<float>(CANVAS_VIEW_HEIGHT - 1 - pt.y) + 0.5f) / static_cast<float>(CANVAS_VIEW_HEIGHT);
+    Ray r0 = cam.get_ray(u0, v0);
+
+    float denom0 = dot(g_grab_plane_normal, r0.direction);
+    if (std::fabs(denom0) > 1e-6f) {
+        float t0 = dot(g_grab_plane_point - r0.origin, g_grab_plane_normal) / denom0;
+        g_grab_plane_hit0 = r0.at(t0);
+    } else {
+        g_grab_plane_hit0 = g_grab_initial_pos;
+    }
+
+    SetCapture(g_hCanvas);
+    SetFocus(g_hCanvas);
+
+    wchar_t status[200];
+    swprintf(status, 200, L"[BLENDER GRAB] Przesuwanie: %s | Ruch mysza | [X/Y/Z]: Blokada osi | [LPM/Enter]: Zatwierdz | [PPM/Esc]: Anuluj",
+             g_scene_objects[g_selected_object_idx].name.c_str());
+    SetWindowTextW(g_hStatusLabel, status);
+
+    InvalidateRect(g_hCanvas, NULL, FALSE);
+}
+
+void ConfirmGrabMode() {
+    if (!g_is_grabbing) return;
+    g_is_grabbing = false;
+    ReleaseCapture();
+    g_axis_lock = AXIS_NONE;
+
+    UpdateObjectFieldsFromSelection(g_selected_object_idx);
+
+    wchar_t status[200];
+    const auto& obj = g_scene_objects[g_selected_object_idx];
+    swprintf(status, 200, L"Zatwierdzono pozycje: [%s] (X: %.2f, Y: %.2f, Z: %.2f)",
+             obj.name.c_str(), obj.center.x, obj.center.y, obj.center.z);
+    SetWindowTextW(g_hStatusLabel, status);
+
+    RenderFastPreview();
+    InvalidateRect(g_hCanvas, NULL, FALSE);
+}
+
+void CancelGrabMode() {
+    if (!g_is_grabbing) return;
+    g_scene_objects[g_selected_object_idx].center = g_grab_initial_pos;
+    g_is_grabbing = false;
+    ReleaseCapture();
+    g_axis_lock = AXIS_NONE;
+
+    UpdateObjectFieldsFromSelection(g_selected_object_idx);
+    SetWindowTextW(g_hStatusLabel, L"Anulowano przesuwanie (przywrocono poczatkowa pozycje).");
+
+    RenderFastPreview();
+    InvalidateRect(g_hCanvas, NULL, FALSE);
+}
+
+void ProcessGrabMove(int mx, int my) {
+    if (!g_is_grabbing) return;
+
+    Camera cam = GetCurrentCamera();
+    float u = (static_cast<float>(mx) + 0.5f) / static_cast<float>(CANVAS_VIEW_WIDTH);
+    float v = (static_cast<float>(CANVAS_VIEW_HEIGHT - 1 - my) + 0.5f) / static_cast<float>(CANVAS_VIEW_HEIGHT);
+    Ray r = cam.get_ray(u, v);
+
+    float denom = dot(g_grab_plane_normal, r.direction);
+    if (std::fabs(denom) > 1e-6f) {
+        float t = dot(g_grab_plane_point - r.origin, g_grab_plane_normal) / denom;
+        Vec3 cur_hit = r.at(t);
+        Vec3 delta = cur_hit - g_grab_plane_hit0;
+
+        if (g_axis_lock == AXIS_X) {
+            delta.y = 0.0f;
+            delta.z = 0.0f;
+        } else if (g_axis_lock == AXIS_Y) {
+            delta.x = 0.0f;
+            delta.z = 0.0f;
+        } else if (g_axis_lock == AXIS_Z) {
+            delta.x = 0.0f;
+            delta.y = 0.0f;
+        }
+
+        Vec3 new_pos = g_grab_initial_pos + delta;
+        g_scene_objects[g_selected_object_idx].center = new_pos;
+
+        UpdateObjectFieldsFromSelection(g_selected_object_idx);
+        RenderFastPreview();
+        InvalidateRect(g_hCanvas, NULL, FALSE);
+    }
 }
 
 void ApplyPositionFromFields() {
@@ -722,11 +1004,15 @@ void ApplyPositionFromFields() {
 
     g_scene_objects[sel].center = Vec3(x, y, z);
     g_scene_objects[sel].radius = r;
+    g_selected_object_idx = sel;
 
     wchar_t msg[128];
     swprintf(msg, 128, L"Zaktualizowano: [%s] (%.2f, %.2f, %.2f) R=%.2f",
              g_scene_objects[sel].name.c_str(), x, y, z, r);
     SetWindowTextW(g_hStatusLabel, msg);
+
+    RenderFastPreview();
+    InvalidateRect(g_hCanvas, NULL, FALSE);
 }
 
 void OnResolutionComboChanged() {
@@ -754,6 +1040,7 @@ void OnResolutionComboChanged() {
 
 void StartRendering() {
     if (g_is_rendering.load()) return;
+    if (g_is_grabbing) ConfirmGrabMode();
 
     wchar_t bufW[32], bufH[32];
     GetWindowTextW(g_hEditResW, bufW, 32);
@@ -808,7 +1095,6 @@ void StartRendering() {
     }
     g_total_tiles = tiles.size();
 
-    // Sortowanie kafelków: od środka na zewnątrz (Center-Out)
     float center_x = g_render_width * 0.5f;
     float center_y = g_render_height * 0.5f;
     std::sort(tiles.begin(), tiles.end(), [center_x, center_y](const Tile& a, const Tile& b) {
@@ -822,6 +1108,7 @@ void StartRendering() {
     EnableWindow(g_hBtnRender, FALSE);
     EnableWindow(g_hBtnStop, TRUE);
     EnableWindow(g_hBtnApplyPos, FALSE);
+    EnableWindow(g_hBtnGrab, FALSE);
     SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, g_total_tiles));
     SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
 
@@ -846,7 +1133,6 @@ void StartRendering() {
         std::shared_ptr<ConvexPolyhedron> glass_crystal = nullptr;
         float crystal_radius = 0.65f;
 
-        // Jasne neutralne podłoże o wysokim kontraście do prezentacji sieci kaustycznej
         world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
                                            std::make_shared<Lambertian>(Vec3(0.85f, 0.85f, 0.88f))));
 
@@ -865,7 +1151,6 @@ void StartRendering() {
             }
         }
 
-        // Kąt kamery skierowany na kryształ i wachlarz kaustyki na podłożu
         const float aspect_ratio = static_cast<float>(g_render_width) / static_cast<float>(g_render_height);
         Vec3 lookfrom(0.2f, 2.5f, 4.3f);
         Vec3 lookat(-0.3f, 0.5f, 0.0f);
@@ -873,9 +1158,6 @@ void StartRendering() {
         float vfov = 38.0f;
         Camera cam(lookfrom, lookat, vup, vfov, aspect_ratio);
 
-        // ====================================================================
-        // FAZA 1: GLOBALNA MAPA FOTONÓW (Spójna kaustyka dla wszystkich kafli)
-        // ====================================================================
         PhotonMap photon_map;
         if (algo == 1 && glass_crystal && !light_sources.empty()) {
             photon_map.init(0.06f, -6.0f, 6.0f, -6.0f, 6.0f);
@@ -969,9 +1251,6 @@ void StartRendering() {
             }
         }
 
-        // ====================================================================
-        // FAZA 2: WIELOWĄTKOWE KAFELKOWANIE (TILING) ZE STOCHASTYCZNYM PRÓBKOWANIEM
-        // ====================================================================
         unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
         std::atomic<size_t> tile_index(0);
         std::vector<std::thread> workers;
@@ -1110,15 +1389,114 @@ void SaveToPNG() {
 }
 
 // ============================================================================
-// 7. PROCEDURA OBSŁUGI OKNA KANWY (PODGLĄD NA ŻYWO)
+// 7. PROCEDURA OBSŁUGI OKNA KANWY (PODGLĄD 3D & BLENDER GRAB)
 // ============================================================================
 
 LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case WM_LBUTTONDOWN: {
+            int mx = LOWORD(lParam);
+            int my = HIWORD(lParam);
+            SetFocus(hWnd);
+
+            if (g_is_grabbing) {
+                ConfirmGrabMode();
+            } else {
+                int hit_idx = RayPickObject(mx, my);
+                if (hit_idx >= 0) {
+                    g_selected_object_idx = hit_idx;
+                    SendMessage(g_hComboObjects, CB_SETCURSEL, hit_idx, 0);
+                    UpdateObjectFieldsFromSelection(hit_idx);
+
+                    wchar_t status[180];
+                    swprintf(status, 180, L"Wybrano: [%s]. Wcisnij 'G', aby przemieszczac myszka w 3D.",
+                             g_scene_objects[hit_idx].name.c_str());
+                    SetWindowTextW(g_hStatusLabel, status);
+
+                    RenderFastPreview();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+            return 0;
+        }
+
+        case WM_RBUTTONDOWN: {
+            if (g_is_grabbing) {
+                CancelGrabMode();
+            }
+            return 0;
+        }
+
+        case WM_MOUSEMOVE: {
+            int mx = LOWORD(lParam);
+            int my = HIWORD(lParam);
+
+            if (g_is_grabbing) {
+                ProcessGrabMove(mx, my);
+            } else {
+                int hit_idx = RayPickObject(mx, my);
+                if (hit_idx >= 0) {
+                    SetCursor(LoadCursor(NULL, IDC_HAND));
+                } else {
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                }
+            }
+            return 0;
+        }
+
+        case WM_SETCURSOR: {
+            if (g_is_grabbing) {
+                SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                return TRUE;
+            }
+            break;
+        }
+
+        case WM_KEYDOWN: {
+            if (wParam == 'G' || wParam == 'g') {
+                if (!g_is_grabbing) {
+                    StartGrabMode();
+                } else {
+                    ConfirmGrabMode();
+                }
+                return 0;
+            }
+            else if (g_is_grabbing) {
+                if (wParam == 'X' || wParam == 'x') {
+                    g_axis_lock = (g_axis_lock == AXIS_X) ? AXIS_NONE : AXIS_X;
+                    POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt);
+                    ProcessGrabMove(pt.x, pt.y);
+                    return 0;
+                }
+                else if (wParam == 'Y' || wParam == 'y') {
+                    g_axis_lock = (g_axis_lock == AXIS_Y) ? AXIS_NONE : AXIS_Y;
+                    POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt);
+                    ProcessGrabMove(pt.x, pt.y);
+                    return 0;
+                }
+                else if (wParam == 'Z' || wParam == 'z') {
+                    g_axis_lock = (g_axis_lock == AXIS_Z) ? AXIS_NONE : AXIS_Z;
+                    POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt);
+                    ProcessGrabMove(pt.x, pt.y);
+                    return 0;
+                }
+                else if (wParam == VK_RETURN) {
+                    ConfirmGrabMode();
+                    return 0;
+                }
+                else if (wParam == VK_ESCAPE) {
+                    CancelGrabMode();
+                    return 0;
+                }
+            }
+            break;
+        }
+
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
+            // 1. Podgląd bufora 3D
             if (!g_display_buffer.empty()) {
                 BITMAPINFO bmi = {};
                 bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -1142,9 +1520,110 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 );
             }
 
+            // 2. Nakładki 3D (Wskaźnik zaznaczenia obiektu, osie X/Y/Z i linie pomocnicze)
+            if (!g_is_rendering.load() && g_selected_object_idx >= 0 && g_selected_object_idx < static_cast<int>(g_scene_objects.size())) {
+                Camera cam = GetCurrentCamera();
+                const auto& sel_obj = g_scene_objects[g_selected_object_idx];
+
+                int sx = 0, sy = 0;
+                float v_w = 2.0f * std::tan(38.0f * 3.14159f / 360.0f) * (static_cast<float>(CANVAS_VIEW_WIDTH) / CANVAS_VIEW_HEIGHT);
+                float v_h = 2.0f * std::tan(38.0f * 3.14159f / 360.0f);
+
+                if (ProjectToScreen(sel_obj.center, cam, v_w, v_h, CANVAS_VIEW_WIDTH, CANVAS_VIEW_HEIGHT, sx, sy)) {
+                    if (g_is_grabbing) {
+                        // Rysowanie zablokowanej osi w 3D (Czerwona X, Zielona Y, Niebieska Z)
+                        HPEN hPenAxis = nullptr;
+                        Vec3 pA, pB;
+                        if (g_axis_lock == AXIS_X) {
+                            hPenAxis = CreatePen(PS_SOLID, 2, RGB(255, 60, 60));
+                            pA = sel_obj.center + Vec3(-15.0f, 0.0f, 0.0f);
+                            pB = sel_obj.center + Vec3( 15.0f, 0.0f, 0.0f);
+                        } else if (g_axis_lock == AXIS_Y) {
+                            hPenAxis = CreatePen(PS_SOLID, 2, RGB(60, 255, 60));
+                            pA = sel_obj.center + Vec3(0.0f, -15.0f, 0.0f);
+                            pB = sel_obj.center + Vec3(0.0f,  15.0f, 0.0f);
+                        } else if (g_axis_lock == AXIS_Z) {
+                            hPenAxis = CreatePen(PS_SOLID, 2, RGB(60, 140, 255));
+                            pA = sel_obj.center + Vec3(0.0f, 0.0f, -15.0f);
+                            pB = sel_obj.center + Vec3(0.0f, 0.0f,  15.0f);
+                        }
+
+                        if (hPenAxis) {
+                            HPEN hOldPen = (HPEN)SelectObject(hdc, hPenAxis);
+                            int ax1 = 0, ay1 = 0, ax2 = 0, ay2 = 0;
+                            if (ProjectToScreen(pA, cam, v_w, v_h, CANVAS_VIEW_WIDTH, CANVAS_VIEW_HEIGHT, ax1, ay1) &&
+                                ProjectToScreen(pB, cam, v_w, v_h, CANVAS_VIEW_WIDTH, CANVAS_VIEW_HEIGHT, ax2, ay2)) {
+                                MoveToEx(hdc, ax1, ay1, NULL);
+                                LineTo(hdc, ax2, ay2);
+                            }
+                            SelectObject(hdc, hOldPen);
+                            DeleteObject(hPenAxis);
+                        }
+
+                        // Kropkowana linia łącząca punkt startowy z aktualną pozycją
+                        int orig_sx = 0, orig_sy = 0;
+                        if (ProjectToScreen(g_grab_initial_pos, cam, v_w, v_h, CANVAS_VIEW_WIDTH, CANVAS_VIEW_HEIGHT, orig_sx, orig_sy)) {
+                            HPEN hPenDash = CreatePen(PS_DOT, 1, RGB(220, 220, 220));
+                            HPEN hOldPen = (HPEN)SelectObject(hdc, hPenDash);
+                            MoveToEx(hdc, orig_sx, orig_sy, NULL);
+                            LineTo(hdc, sx, sy);
+                            SelectObject(hdc, hOldPen);
+                            DeleteObject(hPenDash);
+                        }
+                    }
+
+                    // Pierścień zaznaczenia obiektu (pomarańczowy w stylu Blendera)
+                    HPEN hPenOrange = CreatePen(PS_SOLID, 2, g_is_grabbing ? RGB(255, 230, 20) : RGB(255, 140, 0));
+                    HBRUSH hNullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
+                    HPEN hOldPen = (HPEN)SelectObject(hdc, hPenOrange);
+                    HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hNullBrush);
+
+                    int ring_r = 18;
+                    Ellipse(hdc, sx - ring_r, sy - ring_r, sx + ring_r, sy + ring_r);
+                    MoveToEx(hdc, sx - 6, sy, NULL); LineTo(hdc, sx + 7, sy);
+                    MoveToEx(hdc, sx, sy - 6, NULL); LineTo(hdc, sx, sy + 7);
+
+                    SelectObject(hdc, hOldPen);
+                    SelectObject(hdc, hOldBrush);
+                    DeleteObject(hPenOrange);
+                }
+            }
+
+            // 3. Pasek pomocniczy HUD na dole kanwy
+            if (!g_is_rendering.load()) {
+                SetBkMode(hdc, TRANSPARENT);
+                HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+                HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+
+                RECT hudRect = { 10, CANVAS_VIEW_HEIGHT - 30, CANVAS_VIEW_WIDTH - 10, CANVAS_VIEW_HEIGHT - 6 };
+                HBRUSH hBgBrush = CreateSolidBrush(RGB(18, 22, 28));
+                FillRect(hdc, &hudRect, hBgBrush);
+                DeleteObject(hBgBrush);
+
+                wchar_t hudText[220];
+                if (g_is_grabbing) {
+                    const wchar_t* axisName = L"Swobodny";
+                    if (g_axis_lock == AXIS_X) axisName = L"Os X (Czerwona)";
+                    else if (g_axis_lock == AXIS_Y) axisName = L"Os Y (Zielona)";
+                    else if (g_axis_lock == AXIS_Z) axisName = L"Os Z (Niebieska)";
+
+                    swprintf(hudText, 220, L" ✋ [BLENDER GRAB] %s | Os: %s | [X/Y/Z]: Zmien os | [LPM/Enter]: Zatwierdz | [PPM/Esc]: Anuluj",
+                             g_scene_objects[g_selected_object_idx].name.c_str(), axisName);
+                    SetTextColor(hdc, RGB(255, 215, 0));
+                } else {
+                    swprintf(hudText, 220, L" 🎮 [PODGLAD 3D] Kliknij obiekt LPM, aby wybrac | Klawisz [G]: Przesuwaj (Blender) | Wybrany: %s",
+                             (g_selected_object_idx >= 0 ? g_scene_objects[g_selected_object_idx].name.c_str() : L"Brak"));
+                    SetTextColor(hdc, RGB(210, 225, 245));
+                }
+
+                DrawTextW(hdc, hudText, -1, &hudRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                SelectObject(hdc, hOldFont);
+            }
+
             EndPaint(hWnd, &ps);
             return 0;
         }
+
         case WM_ERASEBKGND:
             return 1;
     }
@@ -1271,10 +1750,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             curY += 50;
 
-            // --- GRUPA 2: PRZESUWANIE PRZEDMIOTÓW ---
-            HWND hGroupObj = CreateWindowW(L"BUTTON", L" Przesuwanie przedmiotow na scenie ",
+            // --- GRUPA 2: PRZESUWANIE PRZEDMIOTÓW (BLENDER INTERFACE) ---
+            HWND hGroupObj = CreateWindowW(L"BUTTON", L" Przesuwanie przedmiotow (Blender 3D) ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                sideX, curY, 380, 185, hWnd, nullptr, nullptr, nullptr);
+                sideX, curY, 380, 195, hWnd, nullptr, nullptr, nullptr);
             SendMessage(hGroupObj, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 22;
@@ -1308,21 +1787,25 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditRadius = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.65", WS_CHILD | WS_VISIBLE, sideX + 260, curY - 2, 80, 22, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hEditRadius, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hBtnApplyPos = CreateWindowW(L"BUTTON", L"Zastosuj pozycje", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                sideX + 185, curY + 32, 155, 36, hWnd, (HMENU)IDC_BTN_APPLY_POS, nullptr, nullptr);
+            g_hBtnApplyPos = CreateWindowW(L"BUTTON", L"Zastosuj recznie", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 185, curY + 24, 155, 28, hWnd, (HMENU)IDC_BTN_APPLY_POS, nullptr, nullptr);
             SendMessage(g_hBtnApplyPos, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hBtnGrab = CreateWindowW(L"BUTTON", L"✋ Przesun w 3D (Klawisz G)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 185, curY + 54, 155, 30, hWnd, (HMENU)IDC_BTN_GRAB, nullptr, nullptr);
+            SendMessage(g_hBtnGrab, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             UpdateObjectFieldsFromSelection(0);
 
-            curY += 82;
+            curY += 92;
 
             // --- GRUPA 3: ZAPIS DO PLIKU PNG ---
             HWND hGroupSave = CreateWindowW(L"BUTTON", L" Zapis obrazu do pliku PNG ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                sideX, curY, 380, 90, hWnd, nullptr, nullptr, nullptr);
+                sideX, curY, 380, 85, hWnd, nullptr, nullptr, nullptr);
             SendMessage(hGroupSave, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 22;
+            curY += 20;
 
             HWND hLblFile = CreateWindowW(L"STATIC", L"Nazwa pliku:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(hLblFile, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -1331,22 +1814,23 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 sideX + 100, curY - 2, 260, 22, hWnd, (HMENU)IDC_EDIT_FILENAME, nullptr, nullptr);
             SendMessage(g_hEditFilename, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 28;
+            curY += 26;
 
             g_hBtnSave = CreateWindowW(L"BUTTON", L"💾 Zapisz obraz PNG",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                sideX + 15, curY, 350, 32, hWnd, (HMENU)IDC_BTN_SAVE_PNG, nullptr, nullptr);
+                sideX + 15, curY, 350, 30, hWnd, (HMENU)IDC_BTN_SAVE_PNG, nullptr, nullptr);
             SendMessage(g_hBtnSave, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
                 WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
                 15, 480, CANVAS_VIEW_WIDTH, 22, hWnd, (HMENU)IDC_PROGRESS_BAR, nullptr, nullptr);
 
-            g_hStatusLabel = CreateWindowW(L"STATIC", L"Gotowy. Szlifowany krysztal generuje geometryczna kaustyke bez kratek kafelkowania. Kliknij 'Rozpocznij renderowanie'.",
+            g_hStatusLabel = CreateWindowW(L"STATIC", L"Gotowy. Kliknij obiekt w kadrze LPM i wcisnij 'G', aby plynnie przesuwac w 3D (styl Blender).",
                 WS_CHILD | WS_VISIBLE,
                 15, 510, CANVAS_VIEW_WIDTH + 390, 30, hWnd, (HMENU)IDC_STATUS_LABEL, nullptr, nullptr);
             SendMessage(g_hStatusLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
+            RenderFastPreview();
             SetTimer(hWnd, TIMER_UPDATE_ID, 33, nullptr);
             break;
         }
@@ -1374,6 +1858,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         EnableWindow(g_hBtnRender, TRUE);
                         EnableWindow(g_hBtnStop, FALSE);
                         EnableWindow(g_hBtnApplyPos, TRUE);
+                        EnableWindow(g_hBtnGrab, TRUE);
 
                         auto now = std::chrono::high_resolution_clock::now();
                         std::chrono::duration<double> elapsed = now - g_render_start_time;
@@ -1386,7 +1871,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         if (g_cancel_render.load()) {
                             swprintf(status, 180, L"[%s] Renderowanie przerwane na kafelku %zu/%zu.", modeTag, done, g_total_tiles);
                         } else {
-                            swprintf(status, 180, L"[%s] Renderowanie ukonczone w %.2f s! Rozdzielczosc: %dx%d px (bez szwow kafelkowania).",
+                            swprintf(status, 180, L"[%s] Renderowanie ukonczone w %.2f s! Rozdzielczosc: %dx%d px.",
                                      modeTag, elapsed.count(), g_render_width, g_render_height);
                         }
                         SetWindowTextW(g_hStatusLabel, status);
@@ -1406,16 +1891,28 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             else if (wmId == IDC_COMBO_OBJECTS && wmEvent == CBN_SELCHANGE) {
                 int sel = static_cast<int>(SendMessage(g_hComboObjects, CB_GETCURSEL, 0, 0));
+                g_selected_object_idx = sel;
                 UpdateObjectFieldsFromSelection(sel);
+                RenderFastPreview();
+                InvalidateRect(g_hCanvas, NULL, FALSE);
             }
             else if (wmId == IDC_BTN_APPLY_POS) {
                 ApplyPositionFromFields();
+            }
+            else if (wmId == IDC_BTN_GRAB) {
+                if (!g_is_grabbing) {
+                    StartGrabMode();
+                } else {
+                    ConfirmGrabMode();
+                }
             }
             else if (wmId == IDC_BTN_RENDER) {
                 StartRendering();
             }
             else if (wmId == IDC_BTN_STOP) {
                 StopRendering();
+                RenderFastPreview();
+                InvalidateRect(g_hCanvas, NULL, FALSE);
             }
             else if (wmId == IDC_BTN_SAVE_PNG) {
                 SaveToPNG();
@@ -1459,7 +1956,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     g_hWnd = CreateWindowW(
         L"PathTracerMainWindow",
-        L"Path Tracer 3D - Szlifowany Krysztal, Spojny Tiling & Globalna Mapa Fotonow",
+        L"Path Tracer 3D - Interaktywny Podglad 3D & Przesuwanie Obiektow (Blender G)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT,
         winWidth, winHeight,
@@ -1473,6 +1970,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
+        if (msg.message == WM_KEYDOWN) {
+            if (msg.wParam == 'G' || msg.wParam == 'g' ||
+                (g_is_grabbing && (msg.wParam == 'X' || msg.wParam == 'x' ||
+                                   msg.wParam == 'Y' || msg.wParam == 'y' ||
+                                   msg.wParam == 'Z' || msg.wParam == 'z' ||
+                                   msg.wParam == VK_ESCAPE || msg.wParam == VK_RETURN))) {
+                HWND hFocus = GetFocus();
+                bool isEditing = (hFocus == g_hEditPosX || hFocus == g_hEditPosY || hFocus == g_hEditPosZ ||
+                                  hFocus == g_hEditRadius || hFocus == g_hEditFilename || hFocus == g_hEditPhotons ||
+                                  hFocus == g_hEditSPP || hFocus == g_hEditDepth || hFocus == g_hEditResW || hFocus == g_hEditResH);
+                if (!isEditing || g_is_grabbing) {
+                    SendMessage(g_hCanvas, WM_KEYDOWN, msg.wParam, msg.lParam);
+                    continue;
+                }
+            }
+        }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
