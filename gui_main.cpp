@@ -13,6 +13,7 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 #include <cmath>
 #include <random>
@@ -572,6 +573,154 @@ Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<S
 }
 
 // ============================================================================
+// 3b. METROPOLIS LIGHT TRANSPORT (MLT) - David Cline & Parris Egbert (2005)
+// ============================================================================
+
+constexpr size_t MLT_DIM = 128;
+
+struct PrimarySampler {
+    const std::vector<float>& u;
+    mutable size_t ptr = 0;
+    std::mt19937* fallback_rng = nullptr;
+
+    float get_1d() const {
+        if (ptr < u.size()) return u[ptr++];
+        if (fallback_rng) {
+            std::uniform_real_distribution<float> d(0.0f, 1.0f);
+            return d(*fallback_rng);
+        }
+        return 0.5f;
+    }
+
+    Vec3 get_unit_vector() const {
+        float z = 1.0f - 2.0f * get_1d();
+        float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        float phi = 2.0f * 3.14159265f * get_1d();
+        return Vec3(r * std::cos(phi), r * std::sin(phi), z);
+    }
+};
+
+inline float color_luminance(const Vec3& c) {
+    // Sekcja 2.2 z artykułu Cline & Egbert (2005): Luminance = 0.299 R + 0.587 G + 0.114 B
+    return 0.299f * c.x + 0.587f * c.y + 0.114f * c.z;
+}
+
+Vec3 evaluate_path_mlt(const Ray& initial_ray, const HittableList& world,
+                       const std::vector<Sphere>& light_sources, const PhotonMap& photon_map,
+                       int max_depth, const PrimarySampler& sampler) {
+    Vec3 accumulated_color(0.0f, 0.0f, 0.0f);
+    Vec3 throughput(1.0f, 1.0f, 1.0f);
+    Ray current_ray = initial_ray;
+    bool last_was_specular = true;
+
+    for (int bounce = 0; bounce < max_depth; ++bounce) {
+        HitRecord rec;
+        if (!world.hit(current_ray, 0.001f, 1e9f, rec)) {
+            Vec3 unit_direction = unit_vector(current_ray.direction);
+            float a = 0.5f * (unit_direction.y + 1.0f);
+            Vec3 sky = (1.0f - a) * Vec3(0.04f, 0.05f, 0.08f) + a * Vec3(0.12f, 0.16f, 0.25f);
+            accumulated_color = accumulated_color + throughput * sky;
+            break;
+        }
+
+        Vec3 emitted = rec.mat->emitted(rec.p);
+        if (!emitted.near_zero()) {
+            if (last_was_specular) {
+                accumulated_color = accumulated_color + throughput * emitted;
+            }
+            break;
+        }
+
+        if (rec.mat->is_dielectric()) {
+            auto diel = static_cast<const Dielectric*>(rec.mat.get());
+            float ref_ratio = rec.front_face ? (1.0f / diel->ir) : diel->ir;
+
+            Vec3 unit_dir = unit_vector(current_ray.direction);
+            float cos_theta = std::fmin(dot(-unit_dir, rec.normal), 1.0f);
+            float sin_theta = std::sqrt(std::max(0.0f, 1.0f - cos_theta * cos_theta));
+
+            bool cannot_refract = ref_ratio * sin_theta > 1.0f;
+            float refl_prob = schlick_reflectance(cos_theta, ref_ratio);
+
+            Vec3 next_dir;
+            if (cannot_refract || refl_prob > sampler.get_1d()) {
+                next_dir = reflect(unit_dir, rec.normal);
+            } else {
+                next_dir = refract(unit_dir, rec.normal, ref_ratio);
+            }
+
+            current_ray = Ray(rec.p, unit_vector(next_dir));
+            last_was_specular = true;
+        }
+        else if (rec.mat->is_specular()) {
+            auto metal = static_cast<const Metal*>(rec.mat.get());
+            Vec3 unit_dir = unit_vector(current_ray.direction);
+            Vec3 reflected = reflect(unit_dir, rec.normal);
+            Vec3 scatter_dir = reflected + metal->roughness * sampler.get_unit_vector();
+            if (dot(scatter_dir, rec.normal) <= 0.0f) break;
+
+            current_ray = Ray(rec.p, unit_vector(scatter_dir));
+            throughput = throughput * metal->albedo;
+            last_was_specular = (metal->roughness < 0.15f);
+        }
+        else {
+            Vec3 albedo = rec.mat->get_albedo();
+
+            // Direct light connection
+            if (!light_sources.empty()) {
+                const auto& light = light_sources[0];
+                Vec3 light_pt = light.center + light.radius * sampler.get_unit_vector();
+                Vec3 to_light = light_pt - rec.p;
+                float dist = to_light.length();
+                Vec3 dir_light = to_light / dist;
+
+                float cos_theta = dot(rec.normal, dir_light);
+                if (cos_theta > 0.0f) {
+                    HitRecord shadow_rec;
+                    if (!world.hit(Ray(rec.p + rec.normal * 0.002f, dir_light), 0.001f, dist - 0.005f, shadow_rec)) {
+                        Vec3 light_norm = unit_vector(light_pt - light.center);
+                        float cos_light = std::fmax(0.0f, dot(light_norm, -dir_light));
+                        float area = 4.0f * 3.14159f * light.radius * light.radius;
+                        float G = (cos_theta * cos_light) / (dist * dist + 0.05f);
+
+                        Vec3 direct = light.mat->emitted(light_pt) * albedo * (G * area * 0.159f);
+                        direct.x = std::fmin(direct.x, 25.0f);
+                        direct.y = std::fmin(direct.y, 25.0f);
+                        direct.z = std::fmin(direct.z, 25.0f);
+                        accumulated_color = accumulated_color + throughput * direct;
+                    }
+                }
+            }
+
+            // Global Photon Map caustic estimation (Sekcja 4 i 5: Bidirectional photon-assisted MLT)
+            if (!photon_map.photons.empty()) {
+                Vec3 caustic_flux = photon_map.estimate_radiance(rec.p, rec.normal, 0.12f);
+                accumulated_color = accumulated_color + throughput * albedo * caustic_flux;
+            }
+
+            // Diffuse outgoing scatter
+            Vec3 rand_v = sampler.get_unit_vector();
+            Vec3 scatter_dir = rec.normal + rand_v;
+            if (scatter_dir.near_zero()) scatter_dir = rec.normal;
+
+            current_ray = Ray(rec.p, unit_vector(scatter_dir));
+            throughput = throughput * albedo;
+            last_was_specular = false;
+        }
+
+        // Russian roulette dla głębszych odbić
+        if (bounce > 3) {
+            float p = std::fmax(throughput.x, std::fmax(throughput.y, throughput.z));
+            p = std::clamp(p, 0.05f, 0.95f);
+            if (sampler.get_1d() > p) break;
+            throughput = throughput / p;
+        }
+    }
+
+    return accumulated_color;
+}
+
+// ============================================================================
 // 4. STRUKTURY DANYCH I ZMIENNE GLOBALNE
 // ============================================================================
 
@@ -629,6 +778,13 @@ std::atomic<int> g_cur_buf_h(450);
 std::vector<uint32_t> g_display_buffer(800 * 450, 0xFF18181B);
 std::vector<Vec3>     g_raw_image(800 * 450, Vec3(0, 0, 0));
 std::vector<int>      g_sample_counts(800 * 450, 0);
+
+// Struktury dla Metropolis Light Transport (MLT):
+std::atomic<size_t> g_mlt_total_mutations(0);
+std::atomic<size_t> g_mlt_mutations_done(0);
+std::vector<Vec3>   g_mlt_accum;
+float               g_mlt_fave = 1.0f;
+std::mutex          g_mlt_mutex;
 
 std::atomic<bool>   g_is_rendering(false);
 std::atomic<bool>   g_cancel_render(false);
@@ -1244,13 +1400,24 @@ void StartRendering() {
     EnableWindow(g_hBtnStop, TRUE);
     EnableWindow(g_hBtnApplyPos, FALSE);
     EnableWindow(g_hBtnGrab, FALSE);
-    SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, g_total_tiles));
-    SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
 
-    const wchar_t* algoName = (g_render_algo == 1) ? L"BDPT + Globalna Mapa Fotonow" : L"Standardowy PT";
+    const wchar_t* algoName = L"Standardowy PT";
+    if (g_render_algo == 1) algoName = L"BDPT + Globalna Mapa Fotonow";
+    else if (g_render_algo == 2) algoName = L"Metropolis Light Transport (MLT)";
+
     wchar_t statusInit[160];
-    swprintf(statusInit, 160, L"Rozpoczynanie [%s]: %zu kafelkow %dx%d px (%d fotonow)...",
-             algoName, g_total_tiles, g_tile_size, g_tile_size, g_photon_count);
+    if (g_render_algo == 2) {
+        size_t total_mutations = static_cast<size_t>(g_render_width) * g_render_height * spp;
+        swprintf(statusInit, 160, L"Rozpoczynanie [MLT]: %zu mutacji (%d/px, %d fotonow)...",
+                 total_mutations, spp, g_photon_count);
+        SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 1000));
+        SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
+    } else {
+        swprintf(statusInit, 160, L"Rozpoczynanie [%s]: %zu kafelkow %dx%d px (%d fotonow)...",
+                 algoName, g_total_tiles, g_tile_size, g_tile_size, g_photon_count);
+        SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, g_total_tiles));
+        SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
+    }
     SetWindowTextW(g_hStatusLabel, statusInit);
 
     g_is_rendering.store(true);
@@ -1290,7 +1457,7 @@ void StartRendering() {
         Camera cam = GetCameraForRender(g_render_width, g_render_height);
 
         PhotonMap photon_map;
-        if (algo == 1 && glass_crystal && !light_sources.empty()) {
+        if ((algo == 1 || algo == 2) && glass_crystal && !light_sources.empty()) {
             photon_map.init(0.06f, -6.0f, 6.0f, -6.0f, 6.0f);
 
             const auto& light = light_sources[0];
@@ -1382,89 +1549,320 @@ void StartRendering() {
             }
         }
 
-        unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
-        std::atomic<size_t> tile_index(0);
-        std::vector<std::thread> workers;
+        if (algo == 2) {
+            // ================================================================
+            // METROPOLIS LIGHT TRANSPORT (MLT) - Cline & Egbert (2005)
+            // ================================================================
+            size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
+            {
+                std::lock_guard<std::mutex> lock(g_mlt_mutex);
+                g_mlt_accum.assign(total_pixels, Vec3(0, 0, 0));
+            }
+            size_t total_mutations = total_pixels * spp;
+            g_mlt_total_mutations.store(total_mutations);
+            g_mlt_mutations_done.store(0);
 
-        for (unsigned int t = 0; t < num_threads; ++t) {
-            workers.emplace_back([&, t]() {
-                std::mt19937 rng(1337 + t * 997);
-                std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+            unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+            size_t bootstrap_count = 25000;
+            size_t boot_per_thread = bootstrap_count / num_threads;
 
-                while (!g_cancel_render.load()) {
-                    size_t idx = tile_index.fetch_add(1);
-                    if (idx >= tiles.size()) break;
+            struct SeedPath {
+                std::vector<float> u;
+                Vec3 col;
+                float lum = 0.0f;
+            };
 
-                    const Tile& tile = tiles[idx];
-                    int tw = tile.x1 - tile.x0;
-                    int th = tile.y1 - tile.y0;
+            std::vector<std::vector<SeedPath>> thread_seeds(num_threads);
+            std::vector<double> thread_lum_sum(num_threads, 0.0);
+            std::vector<std::thread> boot_workers;
 
-                    std::vector<std::pair<int, int>> offsets;
-                    offsets.reserve(tw * th);
-                    for (int dy = 0; dy < th; ++dy) {
-                        for (int dx = 0; dx < tw; ++dx) {
-                            offsets.emplace_back(dx, dy);
+            // 1. Faza Bootstrap (Sekcja 3.5 z pracy): oszacowanie fave oraz znalezienie jasnych ścieżek
+            for (unsigned int th = 0; th < num_threads; ++th) {
+                boot_workers.emplace_back([&, th]() {
+                    std::mt19937 rng(4321 + th * 7823);
+                    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+                    double local_lum = 0.0;
+                    auto& s_list = thread_seeds[th];
+
+                    for (size_t b = 0; b < boot_per_thread && !g_cancel_render.load(); ++b) {
+                        std::vector<float> u(MLT_DIM);
+                        for (size_t k = 0; k < MLT_DIM; ++k) u[k] = dist01(rng);
+
+                        PrimarySampler sampler{u, 2, &rng};
+                        Ray r = cam.get_ray(u[0], 1.0f - u[1]);
+
+                        Vec3 col = evaluate_path_mlt(r, world, light_sources, photon_map, max_depth, sampler);
+                        float lum = color_luminance(col);
+                        local_lum += lum;
+
+                        if (lum > 1e-4f) {
+                            s_list.push_back({u, col, lum});
                         }
                     }
+                    thread_lum_sum[th] = local_lum;
+                });
+            }
 
-                    for (int s = 0; s < spp && !g_cancel_render.load(); ++s) {
-                        std::shuffle(offsets.begin(), offsets.end(), rng);
+            for (auto& bw : boot_workers) {
+                if (bw.joinable()) bw.join();
+            }
 
-                        for (const auto& off : offsets) {
-                            if (g_cancel_render.load()) break;
+            if (g_cancel_render.load()) {
+                g_is_rendering.store(false);
+                return;
+            }
 
-                            int px = tile.x0 + off.first;
-                            int py = tile.y0 + off.second;
-
-                            // Precyzyjny TOP-DOWN raytracing zgodny z buforem
-                            float u = (static_cast<float>(px) + dist01(rng)) / static_cast<float>(g_render_width);
-                            float v = (static_cast<float>(g_render_height - 1 - py) + dist01(rng)) / static_cast<float>(g_render_height);
-
-                            Ray r = cam.get_ray(u, v);
-                            Vec3 col;
-
-                            if (algo == 1) {
-                                col = ray_color_bdpt(r, world, light_sources, photon_map, max_depth, rng);
-                            } else {
-                                col = ray_color_standard(r, world, max_depth, rng);
-                            }
-
-                            int p_idx = py * g_render_width + px;
-                            g_raw_image[p_idx] = g_raw_image[p_idx] + col;
-                            g_sample_counts[p_idx] += 1;
-
-                            int count = g_sample_counts[p_idx];
-                            Vec3 avg = g_raw_image[p_idx] / static_cast<float>(count);
-
-                            float cr = std::clamp(std::sqrt(avg.x), 0.0f, 0.999f);
-                            float cg = std::clamp(std::sqrt(avg.y), 0.0f, 0.999f);
-                            float cb = std::clamp(std::sqrt(avg.z), 0.0f, 0.999f);
-
-                            uint8_t ir = static_cast<uint8_t>(256.0f * cr);
-                            uint8_t ig = static_cast<uint8_t>(256.0f * cg);
-                            uint8_t ib = static_cast<uint8_t>(256.0f * cb);
-
-                            g_display_buffer[p_idx] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
-                        }
-                    }
-
-                    g_completed_tiles.fetch_add(1);
+            double total_lum = 0.0;
+            std::vector<SeedPath> all_seeds;
+            for (unsigned int th = 0; th < num_threads; ++th) {
+                total_lum += thread_lum_sum[th];
+                for (const auto& sp : thread_seeds[th]) {
+                    all_seeds.push_back(sp);
                 }
-            });
-        }
+            }
 
-        for (auto& worker : workers) {
-            if (worker.joinable()) worker.join();
-        }
+            float f_ave = static_cast<float>(total_lum / static_cast<double>(bootstrap_count));
+            if (f_ave < 1e-6f) f_ave = 1.0f;
+            g_mlt_fave = f_ave;
 
-        g_is_rendering.store(false);
+            // 2. Równoległe łańcuchy Markowa MCMC (Jeden łańcuch na wątek CPU)
+            size_t mutations_per_thread = total_mutations / num_threads;
+            std::vector<std::thread> mlt_workers;
+
+            for (unsigned int th = 0; th < num_threads; ++th) {
+                mlt_workers.emplace_back([&, th]() {
+                    std::mt19937 rng(99991 + th * 6271);
+                    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+
+                    SeedPath cur_x;
+                    if (!all_seeds.empty()) {
+                        cur_x = all_seeds[(th * 17) % all_seeds.size()];
+                    } else {
+                        cur_x.u.resize(MLT_DIM);
+                        for (size_t k = 0; k < MLT_DIM; ++k) cur_x.u[k] = dist01(rng);
+                        PrimarySampler sampler{cur_x.u, 2, &rng};
+                        Ray r = cam.get_ray(cur_x.u[0], 1.0f - cur_x.u[1]);
+                        cur_x.col = evaluate_path_mlt(r, world, light_sources, photon_map, max_depth, sampler);
+                        cur_x.lum = color_luminance(cur_x.col);
+                    }
+
+                    std::vector<Vec3> local_film(total_pixels, Vec3(0, 0, 0));
+                    std::vector<float> u_prop(MLT_DIM);
+
+                    int width = g_render_width;
+                    int height = g_render_height;
+                    float r1 = 0.1f;
+                    float r2 = 0.08f * static_cast<float>(std::min(width, height));
+                    float log_r2_r1 = std::log(r2 / r1);
+                    float theta1 = 0.0001f;
+                    float theta2 = 0.1f;
+                    float log_theta = std::log(theta2 / theta1);
+
+                    size_t chunk_size = 20000;
+                    size_t steps_in_chunk = 0;
+
+                    for (size_t m = 0; m < mutations_per_thread && !g_cancel_render.load(); ++m) {
+                        bool is_large = (dist01(rng) < 0.20f);
+
+                        if (is_large) {
+                            // Nowa ścieżka (Sekcja 3.2 z pracy) - gwarantuje ergodyczność
+                            for (size_t k = 0; k < MLT_DIM; ++k) u_prop[k] = dist01(rng);
+                        } else {
+                            u_prop = cur_x.u;
+                            // Perturbacja soczewki kamery (Appendix B)
+                            float px_f = cur_x.u[0] * static_cast<float>(width);
+                            float py_f = cur_x.u[1] * static_cast<float>(height);
+                            float phi = dist01(rng) * 6.2831853f;
+                            float r = r2 * std::exp(-log_r2_r1 * dist01(rng));
+                            float nx = px_f + r * std::cos(phi);
+                            float ny = py_f + r * std::sin(phi);
+                            nx = std::fmod(std::fmod(nx, static_cast<float>(width)) + static_cast<float>(width), static_cast<float>(width));
+                            ny = std::fmod(std::fmod(ny, static_cast<float>(height)) + static_cast<float>(height), static_cast<float>(height));
+                            u_prop[0] = nx / static_cast<float>(width);
+                            u_prop[1] = ny / static_cast<float>(height);
+
+                            // Perturbacja kątowa odbić promieni (Appendix C)
+                            for (size_t k = 2; k < MLT_DIM; ++k) {
+                                float r_ang = theta2 * std::exp(-log_theta * dist01(rng));
+                                float sign = (dist01(rng) < 0.5f) ? -1.0f : 1.0f;
+                                float val = cur_x.u[k] + sign * r_ang * 0.25f;
+                                if (val < 0.0f) val += 1.0f;
+                                if (val >= 1.0f) val -= 1.0f;
+                                u_prop[k] = val;
+                            }
+                        }
+
+                        PrimarySampler prop_sampler{u_prop, 2, &rng};
+                        Ray prop_ray = cam.get_ray(u_prop[0], 1.0f - u_prop[1]);
+                        Vec3 col_prop = evaluate_path_mlt(prop_ray, world, light_sources, photon_map, max_depth, prop_sampler);
+                        float lum_prop = color_luminance(col_prop);
+
+                        float A = (cur_x.lum <= 1e-7f) ? 1.0f : std::min(1.0f, lum_prop / cur_x.lum);
+
+                        // Akumulacja wartości oczekiwanej do lokalnego filmu (Sekcja 5.1 & Rysunek 4)
+                        if (lum_prop > 1e-7f && A > 1e-7f) {
+                            int px_y = std::clamp(static_cast<int>(u_prop[0] * width), 0, width - 1);
+                            int py_y = std::clamp(static_cast<int>(u_prop[1] * height), 0, height - 1);
+                            int idx_y = py_y * width + px_y;
+                            local_film[idx_y] = local_film[idx_y] + (col_prop / lum_prop) * A;
+                        }
+
+                        if (cur_x.lum > 1e-7f && (1.0f - A) > 1e-7f) {
+                            int px_x = std::clamp(static_cast<int>(cur_x.u[0] * width), 0, width - 1);
+                            int py_x = std::clamp(static_cast<int>(cur_x.u[1] * height), 0, height - 1);
+                            int idx_x = py_x * width + px_x;
+                            local_film[idx_x] = local_film[idx_x] + (cur_x.col / cur_x.lum) * (1.0f - A);
+                        }
+
+                        // Warunek akceptacji wg Detailed Balance (Równanie 2)
+                        if (dist01(rng) < A) {
+                            cur_x.u = u_prop;
+                            cur_x.col = col_prop;
+                            cur_x.lum = lum_prop;
+                        }
+
+                        steps_in_chunk++;
+                        if (steps_in_chunk >= chunk_size) {
+                            {
+                                std::lock_guard<std::mutex> lock(g_mlt_mutex);
+                                for (size_t p = 0; p < total_pixels; ++p) {
+                                    g_mlt_accum[p] = g_mlt_accum[p] + local_film[p];
+                                    local_film[p] = Vec3(0, 0, 0);
+                                }
+                                g_mlt_mutations_done.fetch_add(steps_in_chunk);
+                            }
+                            steps_in_chunk = 0;
+                        }
+                    }
+
+                    if (steps_in_chunk > 0) {
+                        std::lock_guard<std::mutex> lock(g_mlt_mutex);
+                        for (size_t p = 0; p < total_pixels; ++p) {
+                            g_mlt_accum[p] = g_mlt_accum[p] + local_film[p];
+                        }
+                        g_mlt_mutations_done.fetch_add(steps_in_chunk);
+                    }
+                });
+            }
+
+            for (auto& mw : mlt_workers) {
+                if (mw.joinable()) mw.join();
+            }
+
+            // Ostateczne skalowanie histogramu metodą Metropolis (Równanie 1: s = fave / have)
+            size_t m_done = g_mlt_mutations_done.load();
+            if (m_done > 0) {
+                float scale = (g_mlt_fave * total_pixels) / static_cast<float>(m_done);
+                std::lock_guard<std::mutex> lock(g_mlt_mutex);
+                for (size_t i = 0; i < total_pixels; ++i) {
+                    Vec3 rad = g_mlt_accum[i] * scale;
+                    g_raw_image[i] = rad;
+                    g_sample_counts[i] = 1;
+
+                    float cr = std::clamp(std::sqrt(rad.x), 0.0f, 0.999f);
+                    float cg = std::clamp(std::sqrt(rad.y), 0.0f, 0.999f);
+                    float cb = std::clamp(std::sqrt(rad.z), 0.0f, 0.999f);
+
+                    uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+                    uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+                    uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+
+                    g_display_buffer[i] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
+                }
+            }
+            g_is_rendering.store(false);
+        } else {
+            // ================================================================
+            // KAFELKOWY STANDARDOWY PT LUB BDPT
+            // ================================================================
+            unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+            std::atomic<size_t> tile_index(0);
+            std::vector<std::thread> workers;
+
+            for (unsigned int t = 0; t < num_threads; ++t) {
+                workers.emplace_back([&, t]() {
+                    std::mt19937 rng(1337 + t * 997);
+                    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+
+                    while (!g_cancel_render.load()) {
+                        size_t idx = tile_index.fetch_add(1);
+                        if (idx >= tiles.size()) break;
+
+                        const Tile& tile = tiles[idx];
+                        int tw = tile.x1 - tile.x0;
+                        int th = tile.y1 - tile.y0;
+
+                        std::vector<std::pair<int, int>> offsets;
+                        offsets.reserve(tw * th);
+                        for (int dy = 0; dy < th; ++dy) {
+                            for (int dx = 0; dx < tw; ++dx) {
+                                offsets.emplace_back(dx, dy);
+                            }
+                        }
+
+                        for (int s = 0; s < spp && !g_cancel_render.load(); ++s) {
+                            std::shuffle(offsets.begin(), offsets.end(), rng);
+
+                            for (const auto& off : offsets) {
+                                if (g_cancel_render.load()) break;
+
+                                int px = tile.x0 + off.first;
+                                int py = tile.y0 + off.second;
+
+                                // Precyzyjny TOP-DOWN raytracing zgodny z buforem
+                                float u = (static_cast<float>(px) + dist01(rng)) / static_cast<float>(g_render_width);
+                                float v = (static_cast<float>(g_render_height - 1 - py) + dist01(rng)) / static_cast<float>(g_render_height);
+
+                                Ray r = cam.get_ray(u, v);
+                                Vec3 col;
+
+                                if (algo == 1) {
+                                    col = ray_color_bdpt(r, world, light_sources, photon_map, max_depth, rng);
+                                } else {
+                                    col = ray_color_standard(r, world, max_depth, rng);
+                                }
+
+                                int p_idx = py * g_render_width + px;
+                                g_raw_image[p_idx] = g_raw_image[p_idx] + col;
+                                g_sample_counts[p_idx] += 1;
+
+                                int count = g_sample_counts[p_idx];
+                                Vec3 avg = g_raw_image[p_idx] / static_cast<float>(count);
+
+                                float cr = std::clamp(std::sqrt(avg.x), 0.0f, 0.999f);
+                                float cg = std::clamp(std::sqrt(avg.y), 0.0f, 0.999f);
+                                float cb = std::clamp(std::sqrt(avg.z), 0.0f, 0.999f);
+
+                                uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+                                uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+                                uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+
+                                g_display_buffer[p_idx] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
+                            }
+                        }
+
+                        g_completed_tiles.fetch_add(1);
+                    }
+                });
+            }
+
+            for (auto& worker : workers) {
+                if (worker.joinable()) worker.join();
+            }
+
+            g_is_rendering.store(false);
+        }
     }).detach();
 }
 
 void StopRendering() {
     if (g_is_rendering.load()) {
         g_cancel_render.store(true);
-        SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie watkow kafelkowania...");
+        if (g_render_algo == 2) {
+            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie lancuchow Markowa (MLT)...");
+        } else {
+            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie watkow kafelkowania...");
+        }
     }
 }
 
@@ -2066,6 +2464,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SendMessage(g_hComboAlgo, WM_SETFONT, (WPARAM)hFont, TRUE);
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Standardowy Path Tracing (PT)");
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"BDPT (Globalna Mapa Fotonow - Krysztal)");
+            SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Metropolis Light Transport (MLT)");
             SendMessage(g_hComboAlgo, CB_SETCURSEL, 1, 0);
 
             curY += 27;
@@ -2242,19 +2641,53 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_TIMER: {
             if (wParam == TIMER_UPDATE_ID) {
                 if (g_is_rendering.load()) {
-                    size_t done = g_completed_tiles.load();
-                    SendMessage(g_hProgressBar, PBM_SETPOS, done, 0);
-
                     auto now = std::chrono::high_resolution_clock::now();
                     std::chrono::duration<double> elapsed = now - g_render_start_time;
 
-                    int percent = (g_total_tiles > 0) ? static_cast<int>(done * 100 / g_total_tiles) : 0;
-                    const wchar_t* modeTag = (g_render_algo == 1) ? L"BDPT + Mapa Fotonow" : L"PT";
+                    if (g_render_algo == 2) {
+                        size_t done = g_mlt_mutations_done.load();
+                        size_t total = g_mlt_total_mutations.load();
+                        int pos = (total > 0) ? static_cast<int>(done * 1000 / total) : 0;
+                        int percent = (total > 0) ? static_cast<int>(done * 100 / total) : 0;
+                        SendMessage(g_hProgressBar, PBM_SETPOS, pos, 0);
 
-                    wchar_t status[180];
-                    swprintf(status, 180, L"Renderowanie [%s]... %d%% (%zu/%zu kafelkow) [Czas: %.1f s, Fotony: %d]",
-                             modeTag, percent, done, g_total_tiles, elapsed.count(), g_photon_count);
-                    SetWindowTextW(g_hStatusLabel, status);
+                        size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
+                        if (done > 0 && g_mlt_accum.size() >= total_pixels) {
+                            float scale = (g_mlt_fave * total_pixels) / static_cast<float>(done);
+                            std::lock_guard<std::mutex> lock(g_mlt_mutex);
+                            for (size_t i = 0; i < total_pixels; ++i) {
+                                Vec3 rad = g_mlt_accum[i] * scale;
+                                g_raw_image[i] = rad;
+                                g_sample_counts[i] = 1;
+
+                                float cr = std::clamp(std::sqrt(rad.x), 0.0f, 0.999f);
+                                float cg = std::clamp(std::sqrt(rad.y), 0.0f, 0.999f);
+                                float cb = std::clamp(std::sqrt(rad.z), 0.0f, 0.999f);
+
+                                uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+                                uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+                                uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+
+                                g_display_buffer[i] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
+                            }
+                        }
+
+                        wchar_t status[200];
+                        swprintf(status, 200, L"Renderowanie [Metropolis Light Transport]... %d%% (%zu/%zu mutacji) [Czas: %.1f s]",
+                                 percent, done, total, elapsed.count());
+                        SetWindowTextW(g_hStatusLabel, status);
+                    } else {
+                        size_t done = g_completed_tiles.load();
+                        SendMessage(g_hProgressBar, PBM_SETPOS, done, 0);
+
+                        int percent = (g_total_tiles > 0) ? static_cast<int>(done * 100 / g_total_tiles) : 0;
+                        const wchar_t* modeTag = (g_render_algo == 1) ? L"BDPT + Mapa Fotonow" : L"PT";
+
+                        wchar_t status[180];
+                        swprintf(status, 180, L"Renderowanie [%s]... %d%% (%zu/%zu kafelkow) [Czas: %.1f s, Fotony: %d]",
+                                 modeTag, percent, done, g_total_tiles, elapsed.count(), g_photon_count);
+                        SetWindowTextW(g_hStatusLabel, status);
+                    }
 
                     InvalidateRect(g_hCanvas, NULL, FALSE);
                 } else {
@@ -2267,17 +2700,30 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         auto now = std::chrono::high_resolution_clock::now();
                         std::chrono::duration<double> elapsed = now - g_render_start_time;
 
-                        size_t done = g_completed_tiles.load();
-                        SendMessage(g_hProgressBar, PBM_SETPOS, done, 0);
-
-                        const wchar_t* modeTag = (g_render_algo == 1) ? L"BDPT" : L"PT";
+                        const wchar_t* modeTag = (g_render_algo == 2) ? L"MLT" : ((g_render_algo == 1) ? L"BDPT" : L"PT");
                         wchar_t status[180];
-                        if (g_cancel_render.load()) {
-                            swprintf(status, 180, L"[%s] Renderowanie przerwane na kafelku %zu/%zu.", modeTag, done, g_total_tiles);
+
+                        if (g_render_algo == 2) {
+                            size_t done = g_mlt_mutations_done.load();
+                            size_t total = g_mlt_total_mutations.load();
+                            SendMessage(g_hProgressBar, PBM_SETPOS, 1000, 0);
+                            if (g_cancel_render.load()) {
+                                swprintf(status, 180, L"[%s] Renderowanie przerwane na %zu/%zu mutacjach.", modeTag, done, total);
+                            } else {
+                                swprintf(status, 180, L"[%s] Renderowanie ukonczone w %.2f s! (%zu mutacji, %dx%d px).",
+                                         modeTag, elapsed.count(), done, g_render_width, g_render_height);
+                            }
                         } else {
-                            swprintf(status, 180, L"[%s] Renderowanie ukonczone w %.2f s! Rozdzielczosc: %dx%d px.",
-                                     modeTag, elapsed.count(), g_render_width, g_render_height);
+                            size_t done = g_completed_tiles.load();
+                            SendMessage(g_hProgressBar, PBM_SETPOS, done, 0);
+                            if (g_cancel_render.load()) {
+                                swprintf(status, 180, L"[%s] Renderowanie przerwane na kafelku %zu/%zu.", modeTag, done, g_total_tiles);
+                            } else {
+                                swprintf(status, 180, L"[%s] Renderowanie ukonczone w %.2f s! Rozdzielczosc: %dx%d px.",
+                                         modeTag, elapsed.count(), g_render_width, g_render_height);
+                            }
                         }
+
                         SetWindowTextW(g_hStatusLabel, status);
                         InvalidateRect(g_hCanvas, NULL, FALSE);
                     }
@@ -2290,7 +2736,18 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int wmId = LOWORD(wParam);
             int wmEvent = HIWORD(wParam);
 
-            if (wmId == IDC_COMBO_RES && wmEvent == CBN_SELCHANGE) {
+            if (wmId == IDC_COMBO_ALGO && wmEvent == CBN_SELCHANGE) {
+                int sel = static_cast<int>(SendMessage(g_hComboAlgo, CB_GETCURSEL, 0, 0));
+                g_render_algo = sel;
+                if (sel == 2) {
+                    SetWindowTextW(g_hLblSPP, L"Mutacje/px:");
+                    EnableWindow(g_hComboTile, FALSE);
+                } else {
+                    SetWindowTextW(g_hLblSPP, L"Probki (SPP):");
+                    EnableWindow(g_hComboTile, TRUE);
+                }
+            }
+            else if (wmId == IDC_COMBO_RES && wmEvent == CBN_SELCHANGE) {
                 OnResolutionComboChanged();
             }
             else if (wmId == IDC_COMBO_OBJECTS && wmEvent == CBN_SELCHANGE) {

@@ -41,6 +41,15 @@ Kompletny zestaw narzędzi do renderowania metodą **Path Tracingu** (Monte Carl
 8. **Konfiguracja ilości fotonów i własna nazwa pliku PNG**:
    - Pełna edycja ilości fotonów kaustyki (`IDC_EDIT_PHOTONS`) oraz nazwy pliku przed zapisem (`IDC_EDIT_FILENAME`).
 
+9. **Metropolis Light Transport (MLT) – David Cline & Parris Egbert (2005)**:
+   - Dodano zaawansowaną metodę transportu światła **MLT** opartą na łańcuchach Markowa (MCMC) i zasadzie równowagi szczegółowej (*Detailed Balance*).
+   - **Nowa ścieżka (Large Step Mutation, Sekcja 3.2)**: Losuje zupełnie nową ścieżkę światła, gwarantując ergodyczność i eksplorację całej sceny.
+   - **Perturbacja soczewki (Lens Perturbation, Appendix B)**: Wykładniczo rozproszone przesunięcie punktu na płaszczyźnie projekcji ($r = r_2 \cdot e^{-\ln(r_2/r_1)\xi}$), pozwalające na gęste próbkowanie pasm kaustycznych.
+   - **Perturbacja kątowa odbić (Angular Perturbation, Appendix C)**: Wykładnicze zaburzenie kąta odbicia i załamania promieni ($\theta = \theta_2 \cdot e^{-\ln(\theta_2/\theta_1)\xi}$).
+   - **Akumulacja wartości oczekiwanej (Expected Value Accumulation, Sekcja 5.1)**: Obie propozycje ($Y$ oraz $X$) wpłacają swój wkład ważony prawdopodobieństwem akceptacji $a(y|x) = \min(1, F_y/F_x)$, drastycznie redukując szum.
+   - **Faza Bootstrap & Skalowanie (Sekcja 3.5 & Równanie 1)**: Oszacowanie średniej luminancji $f_{ave}$ i skalowanie histogramu próbek $s = f_{ave} / h_{ave}$.
+   - **Równoległość MCMC**: Niezależne łańcuchy Markowa na wszystkich rdzeniach procesora z aktualizacją podglądu w czasie rzeczywistym.
+
 ---
 
 ## Uruchomienie
