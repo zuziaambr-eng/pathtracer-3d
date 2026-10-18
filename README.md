@@ -50,6 +50,13 @@ Kompletny zestaw narzędzi do renderowania metodą **Path Tracingu** (Monte Carl
    - **Faza Bootstrap & Skalowanie (Sekcja 3.5 & Równanie 1)**: Oszacowanie średniej luminancji $f_{ave}$ i skalowanie histogramu próbek $s = f_{ave} / h_{ave}$.
    - **Równoległość MCMC**: Niezależne łańcuchy Markowa na wszystkich rdzeniach procesora z aktualizacją podglądu w czasie rzeczywistym.
 
+10. **Manifold Exploration (MEMLT / MEPT) – Wenzel Jakob & Steve Marschner (ACM TOG / SIGGRAPH 2012)**:
+    - Dodano najnowocześniejszą metodę **Manifold Exploration**, rozwiązującą problem renderowania trudnych ścieżek zwierciadlanych i refrakcyjnych ($S^*$).
+    - **Rozmaitość zwierciadlana (*Specular Manifold*, Sekcja 3)**: Zbiór fizycznie dopuszczalnych ścieżek spełniających uogólnione prawo Snella / Fermata tworzy podrozmaitość w przestrzeni ścieżek ($C(\bar{x}) = 0$).
+    - **Algorytm `WALKMANIFOLD` (Sekcja 4 & Rysunek 4)**: Dwuetapowy predyktor-korektor (metoda Newtona) poruszający się w przestrzeni stycznej rozmaitości za pomocą Jacobianu różniczkowego ($J$) i rzutujący promienie z powrotem na rozmaitość za pomocą śledzenia promieni ze zbieżnością kwadratową.
+    - **Perturbacja rozmaitości (*Manifold Perturbation*, Sekcja 5.1 & Rysunek 5, 6)**: Płynne poruszanie się wzdłuż krawędzi i pasm kaustycznych szlifowanego kryształu bez utraty połączenia ze źródłem światła.
+    - **Test odwracalności (*Reversibility*, Sekcja 5.1)**: Weryfikacja powrotnego spaceru gwarantuje pełną odwracalność i zachowanie Detailed Balance w łańcuchu Markowa.
+
 ---
 
 ## Uruchomienie

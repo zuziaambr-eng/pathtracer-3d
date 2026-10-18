@@ -396,6 +396,24 @@ public:
     Ray get_ray(float s, float t) const {
         return Ray(origin, lower_left_corner + s * horizontal + t * vertical - origin);
     }
+
+    bool project_direction(const Vec3& dir, float& out_s, float& out_t) const {
+        Vec3 w = unit_vector(origin - lookat);
+        float alpha = dot(dir, -w);
+        if (alpha <= 1e-5f) return false;
+
+        Vec3 p_plane = (dir / alpha) - (-w);
+        float u_len = horizontal.length();
+        float v_len = vertical.length();
+        if (u_len <= 1e-6f || v_len <= 1e-6f) return false;
+
+        Vec3 u_dir = horizontal / u_len;
+        Vec3 v_dir = vertical / v_len;
+
+        out_s = 0.5f + dot(p_plane, u_dir) / u_len;
+        out_t = 0.5f + dot(p_plane, v_dir) / v_len;
+        return (out_s >= 0.0f && out_s <= 1.0f && out_t >= 0.0f && out_t <= 1.0f);
+    }
 };
 
 // ============================================================================
@@ -718,6 +736,187 @@ Vec3 evaluate_path_mlt(const Ray& initial_ray, const HittableList& world,
     }
 
     return accumulated_color;
+}
+
+// ============================================================================
+// 3c. MANIFOLD EXPLORATION (MEMLT / MEPT) - Wenzel Jakob & Steve Marschner (2012)
+// "Manifold Exploration: A Markov Chain Monte Carlo Technique for Rendering Scenes
+// with Difficult Specular Transport", ACM Trans. Graph. 31(4)
+// ============================================================================
+
+struct CrystalRefractResult {
+    bool hit = false;
+    Vec3 p_enter;
+    Vec3 n_enter;
+    Vec3 p_exit;
+    Vec3 n_exit;
+    Vec3 dir_exit;
+    float path_length = 0.0f;
+};
+
+inline CrystalRefractResult TraceThroughCrystal(
+    const Ray& r_in,
+    const std::shared_ptr<ConvexPolyhedron>& crystal,
+    float ior = 1.55f
+) {
+    CrystalRefractResult res;
+    if (!crystal) return res;
+
+    HitRecord hit_in;
+    if (!crystal->hit(r_in, 0.001f, 1e9f, hit_in)) return res;
+
+    res.hit = true;
+    res.p_enter = hit_in.p;
+    res.n_enter = hit_in.normal;
+
+    Vec3 unit_d = unit_vector(r_in.direction);
+    float cos_in = std::fmin(dot(-unit_d, hit_in.normal), 1.0f);
+    float sin_in = std::sqrt(std::max(0.0f, 1.0f - cos_in * cos_in));
+
+    float eta_in = 1.0f / ior;
+    Vec3 d_int;
+    if (eta_in * sin_in > 1.0f) {
+        d_int = reflect(unit_d, hit_in.normal);
+    } else {
+        d_int = refract(unit_d, hit_in.normal, eta_in);
+    }
+    d_int = unit_vector(d_int);
+
+    // Propagacja promienia wewnątrz kryształu do wyjścia
+    Ray r_int(hit_in.p + d_int * 0.001f, d_int);
+    HitRecord hit_out;
+    if (!crystal->hit(r_int, 0.001f, 1e9f, hit_out)) {
+        res.p_exit = hit_in.p + d_int * 0.1f;
+        res.n_exit = hit_in.normal;
+        res.dir_exit = d_int;
+        return res;
+    }
+
+    res.p_exit = hit_out.p;
+    res.n_exit = hit_out.normal;
+    res.path_length = (hit_out.p - hit_in.p).length();
+
+    Vec3 unit_int = unit_vector(d_int);
+    float cos_out = std::fmin(dot(-unit_int, hit_out.normal), 1.0f);
+    float sin_out = std::sqrt(std::max(0.0f, 1.0f - cos_out * cos_out));
+
+    float eta_out = ior;
+    Vec3 d_out;
+    if (eta_out * sin_out > 1.0f) {
+        d_out = reflect(unit_int, hit_out.normal);
+    } else {
+        d_out = refract(unit_int, hit_out.normal, eta_out);
+    }
+    res.dir_exit = unit_vector(d_out);
+
+    return res;
+}
+
+// Algorytm WALKMANIFOLD (Jakob & Marschner 2012, Rysunek 4 & Sekcja 4):
+// Iteracyjny predyktor-korektor (metoda Newtona) na rozmaitości zwierciadlanej C(x)=0.
+inline bool WalkSpecularManifold(
+    const Vec3& origin,
+    Vec3& inout_dir,
+    const std::shared_ptr<ConvexPolyhedron>& crystal,
+    const Vec3& target_point,
+    const Vec3& target_normal,
+    Vec3& out_final_hit,
+    float tolerance = 1e-3f,
+    int max_iters = 15
+) {
+    if (!crystal) return false;
+
+    Vec3 cur_dir = unit_vector(inout_dir);
+    float beta = 1.0f;
+
+    for (int iter = 0; iter < max_iters; ++iter) {
+        Ray r_cur(origin, cur_dir);
+        auto spec = TraceThroughCrystal(r_cur, crystal, 1.55f);
+        if (!spec.hit) return false;
+
+        float denom = dot(spec.dir_exit, target_normal);
+        if (std::fabs(denom) < 1e-5f) return false;
+
+        float t = dot(target_point - spec.p_exit, target_normal) / denom;
+        if (t <= 0.001f) return false;
+
+        Vec3 hit_plane = spec.p_exit + spec.dir_exit * t;
+        Vec3 diff = target_point - hit_plane;
+        float err = diff.length();
+
+        if (err < tolerance) {
+            inout_dir = cur_dir;
+            out_final_hit = hit_plane;
+            return true;
+        }
+
+        // Baza styczna na sferze kierunków początkowych
+        Vec3 up = (std::fabs(cur_dir.y) > 0.9f) ? Vec3(1.0f, 0.0f, 0.0f) : Vec3(0.0f, 1.0f, 0.0f);
+        Vec3 U = unit_vector(cross(cur_dir, up));
+        Vec3 V = cross(cur_dir, U);
+
+        // Krok różniczkowy promienia h (Sekcja 3.3 i 4: Jacobian rozmaitości)
+        float h = 1e-4f;
+        Ray r_u(origin, unit_vector(cur_dir + h * U));
+        Ray r_v(origin, unit_vector(cur_dir + h * V));
+
+        auto spec_u = TraceThroughCrystal(r_u, crystal, 1.55f);
+        auto spec_v = TraceThroughCrystal(r_v, crystal, 1.55f);
+        if (!spec_u.hit || !spec_v.hit) return false;
+
+        float denom_u = dot(spec_u.dir_exit, target_normal);
+        float denom_v = dot(spec_v.dir_exit, target_normal);
+        if (std::fabs(denom_u) < 1e-5f || std::fabs(denom_v) < 1e-5f) return false;
+
+        float tu = dot(target_point - spec_u.p_exit, target_normal) / denom_u;
+        float tv = dot(target_point - spec_v.p_exit, target_normal) / denom_v;
+        if (tu <= 0.001f || tv <= 0.001f) return false;
+
+        Vec3 hit_u = spec_u.p_exit + spec_u.dir_exit * tu;
+        Vec3 hit_v = spec_v.p_exit + spec_v.dir_exit * tv;
+
+        Vec3 Ju = (hit_u - hit_plane) / h;
+        Vec3 Jv = (hit_v - hit_plane) / h;
+
+        // Rozwiązanie układu równań normalnych J * [du, dv]^T = diff
+        float a = dot(Ju, Ju);
+        float b = dot(Ju, Jv);
+        float c = dot(Jv, Jv);
+        float ru = dot(diff, Ju);
+        float rv = dot(diff, Jv);
+
+        float det = a * c - b * b;
+        if (det < 1e-12f) return false;
+
+        float du = (c * ru - b * rv) / det;
+        float dv = (a * rv - b * ru) / det;
+
+        // Krok predykcji w przestrzeni stycznej rozmaitości:
+        Vec3 next_dir = unit_vector(cur_dir + beta * (du * U + dv * V));
+
+        // Krok korekcji: rzutowanie z powrotem na rozmaitość przez raytracing
+        Ray r_next(origin, next_dir);
+        auto spec_next = TraceThroughCrystal(r_next, crystal, 1.55f);
+        if (spec_next.hit) {
+            float d_next = dot(spec_next.dir_exit, target_normal);
+            if (std::fabs(d_next) > 1e-5f) {
+                float t_next = dot(target_point - spec_next.p_exit, target_normal) / d_next;
+                if (t_next > 0.001f) {
+                    Vec3 hit_next = spec_next.p_exit + spec_next.dir_exit * t_next;
+                    float next_err = (target_point - hit_next).length();
+                    if (next_err < err) {
+                        cur_dir = next_dir;
+                        beta = std::min(1.0f, 2.0f * beta);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        beta *= 0.5f;
+    }
+
+    return false;
 }
 
 // ============================================================================
@@ -1404,12 +1603,14 @@ void StartRendering() {
     const wchar_t* algoName = L"Standardowy PT";
     if (g_render_algo == 1) algoName = L"BDPT + Globalna Mapa Fotonow";
     else if (g_render_algo == 2) algoName = L"Metropolis Light Transport (MLT)";
+    else if (g_render_algo == 3) algoName = L"Manifold Exploration (MEMLT / MEPT)";
 
     wchar_t statusInit[160];
-    if (g_render_algo == 2) {
+    if (g_render_algo == 2 || g_render_algo == 3) {
         size_t total_mutations = static_cast<size_t>(g_render_width) * g_render_height * spp;
-        swprintf(statusInit, 160, L"Rozpoczynanie [MLT]: %zu mutacji (%d/px, %d fotonow)...",
-                 total_mutations, spp, g_photon_count);
+        const wchar_t* tag = (g_render_algo == 3) ? L"MEMLT" : L"MLT";
+        swprintf(statusInit, 160, L"Rozpoczynanie [%s]: %zu mutacji (%d/px, %d fotonow)...",
+                 tag, total_mutations, spp, g_photon_count);
         SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 1000));
         SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
     } else {
@@ -1457,7 +1658,7 @@ void StartRendering() {
         Camera cam = GetCameraForRender(g_render_width, g_render_height);
 
         PhotonMap photon_map;
-        if ((algo == 1 || algo == 2) && glass_crystal && !light_sources.empty()) {
+        if ((algo == 1 || algo == 2 || algo == 3) && glass_crystal && !light_sources.empty()) {
             photon_map.init(0.06f, -6.0f, 6.0f, -6.0f, 6.0f);
 
             const auto& light = light_sources[0];
@@ -1549,9 +1750,9 @@ void StartRendering() {
             }
         }
 
-        if (algo == 2) {
+        if (algo == 2 || algo == 3) {
             // ================================================================
-            // METROPOLIS LIGHT TRANSPORT (MLT) - Cline & Egbert (2005)
+            // MCMC: MLT (Cline & Egbert 2005) / MEMLT (Jakob & Marschner 2012)
             // ================================================================
             size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
             {
@@ -1668,27 +1869,62 @@ void StartRendering() {
                             // Nowa ścieżka (Sekcja 3.2 z pracy) - gwarantuje ergodyczność
                             for (size_t k = 0; k < MLT_DIM; ++k) u_prop[k] = dist01(rng);
                         } else {
-                            u_prop = cur_x.u;
-                            // Perturbacja soczewki kamery (Appendix B)
-                            float px_f = cur_x.u[0] * static_cast<float>(width);
-                            float py_f = cur_x.u[1] * static_cast<float>(height);
-                            float phi = dist01(rng) * 6.2831853f;
-                            float r = r2 * std::exp(-log_r2_r1 * dist01(rng));
-                            float nx = px_f + r * std::cos(phi);
-                            float ny = py_f + r * std::sin(phi);
-                            nx = std::fmod(std::fmod(nx, static_cast<float>(width)) + static_cast<float>(width), static_cast<float>(width));
-                            ny = std::fmod(std::fmod(ny, static_cast<float>(height)) + static_cast<float>(height), static_cast<float>(height));
-                            u_prop[0] = nx / static_cast<float>(width);
-                            u_prop[1] = ny / static_cast<float>(height);
+                            bool did_manifold = false;
+                            if (algo == 3 && glass_crystal && dist01(rng) < 0.50f) {
+                                // Manifold Exploration Perturbation (Jakob & Marschner 2012, Sekcja 5.1 & Rysunek 5 i 6)
+                                Ray cur_cam_ray = cam.get_ray(cur_x.u[0], 1.0f - cur_x.u[1]);
+                                auto spec_test = TraceThroughCrystal(cur_cam_ray, glass_crystal, 1.55f);
+                                if (spec_test.hit) {
+                                    Vec3 target_n(0.0f, 1.0f, 0.0f);
+                                    float d_plane = dot(spec_test.dir_exit, target_n);
+                                    if (std::fabs(d_plane) > 1e-4f) {
+                                        float tp = -spec_test.p_exit.y / d_plane;
+                                        if (tp > 0.001f) {
+                                            Vec3 hit_p = spec_test.p_exit + spec_test.dir_exit * tp;
 
-                            // Perturbacja kątowa odbić promieni (Appendix C)
-                            for (size_t k = 2; k < MLT_DIM; ++k) {
-                                float r_ang = theta2 * std::exp(-log_theta * dist01(rng));
-                                float sign = (dist01(rng) < 0.5f) ? -1.0f : 1.0f;
-                                float val = cur_x.u[k] + sign * r_ang * 0.25f;
-                                if (val < 0.0f) val += 1.0f;
-                                if (val >= 1.0f) val -= 1.0f;
-                                u_prop[k] = val;
+                                            // Perturbacja celu na płaszczyźnie podłoża wg parametru lambda
+                                            std::normal_distribution<float> norm_dist(0.0f, 0.035f);
+                                            Vec3 perturbed_target = hit_p + Vec3(norm_dist(rng), 0.0f, norm_dist(rng));
+
+                                            Vec3 walked_dir = cur_cam_ray.direction;
+                                            Vec3 final_p;
+                                            if (WalkSpecularManifold(cam.origin, walked_dir, glass_crystal, perturbed_target, target_n, final_p, 2e-3f, 12)) {
+                                                float new_s = 0.0f, new_t = 0.0f;
+                                                if (cam.project_direction(walked_dir, new_s, new_t)) {
+                                                    u_prop = cur_x.u;
+                                                    u_prop[0] = std::clamp(new_s, 0.0f, 0.999999f);
+                                                    u_prop[1] = std::clamp(1.0f - new_t, 0.0f, 0.999999f);
+                                                    did_manifold = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (!did_manifold) {
+                                u_prop = cur_x.u;
+                                // Perturbacja soczewki kamery (Appendix B)
+                                float px_f = cur_x.u[0] * static_cast<float>(width);
+                                float py_f = cur_x.u[1] * static_cast<float>(height);
+                                float phi = dist01(rng) * 6.2831853f;
+                                float r = r2 * std::exp(-log_r2_r1 * dist01(rng));
+                                float nx = px_f + r * std::cos(phi);
+                                float ny = py_f + r * std::sin(phi);
+                                nx = std::fmod(std::fmod(nx, static_cast<float>(width)) + static_cast<float>(width), static_cast<float>(width));
+                                ny = std::fmod(std::fmod(ny, static_cast<float>(height)) + static_cast<float>(height), static_cast<float>(height));
+                                u_prop[0] = nx / static_cast<float>(width);
+                                u_prop[1] = ny / static_cast<float>(height);
+
+                                // Perturbacja kątowa odbić promieni (Appendix C)
+                                for (size_t k = 2; k < MLT_DIM; ++k) {
+                                    float r_ang = theta2 * std::exp(-log_theta * dist01(rng));
+                                    float sign = (dist01(rng) < 0.5f) ? -1.0f : 1.0f;
+                                    float val = cur_x.u[k] + sign * r_ang * 0.25f;
+                                    if (val < 0.0f) val += 1.0f;
+                                    if (val >= 1.0f) val -= 1.0f;
+                                    u_prop[k] = val;
+                                }
                             }
                         }
 
@@ -1858,7 +2094,9 @@ void StartRendering() {
 void StopRendering() {
     if (g_is_rendering.load()) {
         g_cancel_render.store(true);
-        if (g_render_algo == 2) {
+        if (g_render_algo == 3) {
+            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie eksploracji rozmaitosci (MEMLT)...");
+        } else if (g_render_algo == 2) {
             SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie lancuchow Markowa (MLT)...");
         } else {
             SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie watkow kafelkowania...");
@@ -2465,6 +2703,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Standardowy Path Tracing (PT)");
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"BDPT (Globalna Mapa Fotonow - Krysztal)");
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Metropolis Light Transport (MLT)");
+            SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Manifold Exploration (MEMLT - Rozmaitosci)");
             SendMessage(g_hComboAlgo, CB_SETCURSEL, 1, 0);
 
             curY += 27;
@@ -2644,7 +2883,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     auto now = std::chrono::high_resolution_clock::now();
                     std::chrono::duration<double> elapsed = now - g_render_start_time;
 
-                    if (g_render_algo == 2) {
+                    if (g_render_algo == 2 || g_render_algo == 3) {
                         size_t done = g_mlt_mutations_done.load();
                         size_t total = g_mlt_total_mutations.load();
                         int pos = (total > 0) ? static_cast<int>(done * 1000 / total) : 0;
@@ -2672,9 +2911,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                             }
                         }
 
+                        const wchar_t* algoLabel = (g_render_algo == 3) ? L"Manifold Exploration MEMLT" : L"Metropolis Light Transport";
                         wchar_t status[200];
-                        swprintf(status, 200, L"Renderowanie [Metropolis Light Transport]... %d%% (%zu/%zu mutacji) [Czas: %.1f s]",
-                                 percent, done, total, elapsed.count());
+                        swprintf(status, 200, L"Renderowanie [%s]... %d%% (%zu/%zu mutacji) [Czas: %.1f s]",
+                                 algoLabel, percent, done, total, elapsed.count());
                         SetWindowTextW(g_hStatusLabel, status);
                     } else {
                         size_t done = g_completed_tiles.load();
@@ -2700,10 +2940,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         auto now = std::chrono::high_resolution_clock::now();
                         std::chrono::duration<double> elapsed = now - g_render_start_time;
 
-                        const wchar_t* modeTag = (g_render_algo == 2) ? L"MLT" : ((g_render_algo == 1) ? L"BDPT" : L"PT");
+                        const wchar_t* modeTag = (g_render_algo == 3) ? L"MEMLT" : ((g_render_algo == 2) ? L"MLT" : ((g_render_algo == 1) ? L"BDPT" : L"PT"));
                         wchar_t status[180];
 
-                        if (g_render_algo == 2) {
+                        if (g_render_algo == 2 || g_render_algo == 3) {
                             size_t done = g_mlt_mutations_done.load();
                             size_t total = g_mlt_total_mutations.load();
                             SendMessage(g_hProgressBar, PBM_SETPOS, 1000, 0);
@@ -2739,7 +2979,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (wmId == IDC_COMBO_ALGO && wmEvent == CBN_SELCHANGE) {
                 int sel = static_cast<int>(SendMessage(g_hComboAlgo, CB_GETCURSEL, 0, 0));
                 g_render_algo = sel;
-                if (sel == 2) {
+                if (sel == 2 || sel == 3) {
                     SetWindowTextW(g_hLblSPP, L"Mutacje/px:");
                     EnableWindow(g_hComboTile, FALSE);
                 } else {
