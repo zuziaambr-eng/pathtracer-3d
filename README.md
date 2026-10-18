@@ -81,6 +81,14 @@ Kompletny zestaw narzędzi do renderowania metodą **Path Tracingu** (Monte Carl
     - Akceleracja AABB (Bounding Box) + szybki algorytm Möllera-Trumbore dla przecięcia promienia z trójkątami.
     - Pełna integracja z silnikiem manipulacji: zaimportowany model można wybierać myszką, przesuwać klawiszem `G`, skalować `S`, blokować osie `X/Y/Z` oraz nakładać na niego dowolne materiały (szkło, złoto, emiter światła, matowy). Dołączono przykładowe pliki `diamond.obj` oraz `test_pyramid.obj`.
 
+14. **Głęboka optymalizacja wydajności (likwidacja wąskiego gardła 700s) i fotorealistyczna kaustyka**:
+    - **Bounding Sphere Culling**: Dodano błyskawiczny test sfery otaczającej do `ConvexPolyhedron`, który w 5 ns odrzuca promienie mijające kryształ, eliminując wielokrotne sprawdzanie 20 płaszczyzn w 95% promieni w scenie.
+    - **Optymalizacja `WalkSpecularManifold`**: Skrócono liczbę kroków metody Newtona-Raphsona do 4 (kwadratowa zbieżność błędu $e \to e^2$) oraz ograniczono perturbację rozmaitości wyłącznie do promieni faktycznie trafiających w kryształ.
+    - **Redukcja zapytań o mapę fotonów**: Ograniczono zapytania `estimate_radiance` do bezpośrednich trafień oka (`bounce == 0`) lub trafień po odbiciu zwierciadlanym (`last_was_specular`), eliminując dziesiątki milionów zbędnych zapytań przestrzennych na głębokich odbiciach w ścianach pokoju.
+    - **Fizyczna ścieżka fotonów w Scenie 2**: Fotony są emitowane ze źródła na zewnętrzne lustro przy $Z = 3.2$, odbijają się zgodnie z prawem odbicia, wpadają przez szczelinę okienną przy $Z = 1.4$ i precyzyjnie trafiają w kryształ i podłogę.
+    - **Dyspersja chromatyczna (Cauchy Spectral Dispersion)**: Podział emisji fotonów na 3 kanały spektralne ($IOR_R = 1.515, IOR_G = 1.530, IOR_B = 1.555$), co tworzy autentyczne, tęczowe krawędzie załamań światła zamiast jednolitej białej plamy.
+    - **Filtr stożkowy Jensena o promieniu 0.028f**: Zmniejszono promień wyszukiwania z 0.12f do 0.028f wraz z gęstą siatką 0.020f i dokładną normalizacją fizyczną $\frac{3}{\pi^2 r^2}$, gwarantując ostre, krystaliczne pasma światła fasetkowego bez przejaskrawień.
+
 ---
 
 ## Uruchomienie

@@ -251,27 +251,41 @@ struct PolyPlane {
 class ConvexPolyhedron : public Hittable {
 public:
     Vec3 center;
+    float bounding_radius = 1.0f;
     std::vector<PolyPlane> planes;
     std::shared_ptr<Material> mat;
 
-    ConvexPolyhedron(const Vec3& c, std::shared_ptr<Material> m)
-        : center(c), mat(std::move(m)) {}
+    ConvexPolyhedron(const Vec3& c, std::shared_ptr<Material> m, float b_rad = 1.2f)
+        : center(c), bounding_radius(b_rad), mat(std::move(m)) {}
 
     void add_plane(const Vec3& normal, float dist) {
         planes.push_back({unit_vector(normal), dist});
     }
 
     bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override {
+        // 1. Szybki test sfery otaczającej (Bounding Sphere Culling)
+        Vec3 oc = r.origin - center;
+        float a = dot(r.direction, r.direction);
+        float half_b = dot(oc, r.direction);
+        float c = dot(oc, oc) - bounding_radius * bounding_radius;
+        if (c > 0.0f && half_b > 0.0f) return false;
+        float discr = half_b * half_b - a * c;
+        if (discr < 0.0f) return false;
+
+        float sqrtd = std::sqrt(discr);
+        float t0 = (-half_b - sqrtd) / a;
+        float t1 = (-half_b + sqrtd) / a;
+        if (t1 < t_min || t0 > t_max) return false;
+
+        // 2. Precyzyjny test slabów wielościanu wypukłego
         float t_enter = -1e9f;
         float t_exit  = 1e9f;
         Vec3 n_enter(0.0f, 1.0f, 0.0f);
         Vec3 n_exit(0.0f, 1.0f, 0.0f);
 
-        Vec3 ro = r.origin - center;
-
         for (const auto& plane : planes) {
             float denom = dot(plane.n, r.direction);
-            float numer = plane.d - dot(plane.n, ro);
+            float numer = plane.d - dot(plane.n, oc);
 
             if (std::fabs(denom) < 1e-7f) {
                 if (numer < 0.0f) {
@@ -315,8 +329,9 @@ public:
 };
 
 std::shared_ptr<ConvexPolyhedron> CreateFacetedCrystal(const Vec3& center, float radius, float height, std::shared_ptr<Material> mat) {
-    auto crystal = std::make_shared<ConvexPolyhedron>(center, mat);
     float half_h = height * 0.5f;
+    float b_rad = std::sqrt(radius * radius + half_h * half_h) * 1.18f;
+    auto crystal = std::make_shared<ConvexPolyhedron>(center, mat, b_rad);
 
     crystal->add_plane(Vec3(0.0f, -1.0f, 0.0f), half_h);
     crystal->add_plane(Vec3(0.0f, 1.0f, 0.0f), half_h);
@@ -642,11 +657,11 @@ struct Photon {
 class PhotonMap {
 public:
     std::vector<Photon> photons;
-    float cell_size = 0.08f;
-    float min_x = -5.0f;
-    float max_x = 5.0f;
-    float min_z = -5.0f;
-    float max_z = 5.0f;
+    float cell_size = 0.02f;
+    float min_x = -6.0f;
+    float max_x = 6.0f;
+    float min_z = -6.0f;
+    float max_z = 6.0f;
     int grid_w = 0;
     int grid_h = 0;
     std::vector<std::vector<uint32_t>> grid;
@@ -671,6 +686,7 @@ public:
         }
     }
 
+    // Dokładne oszacowanie natężenia oświetlenia filtrem stożkowym Jensena (Jensen Cone Filter)
     Vec3 estimate_radiance(const Vec3& p, const Vec3& normal, float search_radius) const {
         if (photons.empty()) return Vec3(0, 0, 0);
 
@@ -681,7 +697,13 @@ public:
 
         float r2 = search_radius * search_radius;
         Vec3 accum(0, 0, 0);
-        float inv_area = 1.0f / (3.14159265f * r2);
+
+        // Normalizacja stożkowa Jensena:
+        // Całka po dysku (1 - d/r) wynosi (pi * r^2) / 3.
+        // Odbita luminancja: L_r = (albedo/pi) * E.
+        // Współczynnik dla irradiance E / pi wynosi: 3.0f / (pi^2 * r^2).
+        constexpr float PI = 3.14159265f;
+        float norm_factor = 3.0f / (PI * PI * r2);
 
         for (int gz = gz0; gz <= gz1; ++gz) {
             int row = gz * grid_w;
@@ -696,7 +718,7 @@ public:
                     if (dist_sq < r2) {
                         float dist = std::sqrt(dist_sq);
                         float w = (1.0f - dist / search_radius);
-                        accum = accum + ph.flux * (w * inv_area * 3.5f);
+                        accum = accum + ph.flux * (w * norm_factor);
                     }
                 }
             }
@@ -784,8 +806,8 @@ Vec3 ray_color_bdpt(const Ray& r, const HittableList& world, const std::vector<S
             }
         }
 
-        if (!is_spec && !photon_map.photons.empty()) {
-            Vec3 caustic_flux = photon_map.estimate_radiance(rec.p, rec.normal, 0.12f);
+        if (!is_spec && !photon_map.photons.empty() && (bounce == 0 || last_was_specular)) {
+            Vec3 caustic_flux = photon_map.estimate_radiance(rec.p, rec.normal, 0.028f);
             accumulated_color = accumulated_color + throughput * albedo * caustic_flux;
         }
 
@@ -924,9 +946,9 @@ Vec3 evaluate_path_mlt(const Ray& initial_ray, const HittableList& world,
                 }
             }
 
-            // Global Photon Map caustic estimation (Sekcja 4 i 5: Bidirectional photon-assisted MLT)
-            if (!photon_map.photons.empty()) {
-                Vec3 caustic_flux = photon_map.estimate_radiance(rec.p, rec.normal, 0.12f);
+            // Global Photon Map caustic estimation (Tylko dla bezpośredniego trafienia oka lub odbicia lustrzanego!)
+            if (!photon_map.photons.empty() && (bounce == 0 || last_was_specular)) {
+                Vec3 caustic_flux = photon_map.estimate_radiance(rec.p, rec.normal, 0.028f);
                 accumulated_color = accumulated_color + throughput * albedo * caustic_flux;
             }
 
@@ -971,7 +993,7 @@ struct CrystalRefractResult {
 inline CrystalRefractResult TraceThroughCrystal(
     const Ray& r_in,
     const std::shared_ptr<ConvexPolyhedron>& crystal,
-    float ior = 1.55f
+    float ior = 1.530f
 ) {
     CrystalRefractResult res;
     if (!crystal) return res;
@@ -990,44 +1012,64 @@ inline CrystalRefractResult TraceThroughCrystal(
     float eta_in = 1.0f / ior;
     Vec3 d_int;
     if (eta_in * sin_in > 1.0f) {
+        // Całkowite odbicie wewnętrzne na wejściu (TIR)
         d_int = reflect(unit_d, hit_in.normal);
+        res.p_exit = hit_in.p;
+        res.n_exit = hit_in.normal;
+        res.dir_exit = unit_vector(d_int);
+        return res;
     } else {
         d_int = refract(unit_d, hit_in.normal, eta_in);
     }
     d_int = unit_vector(d_int);
 
-    // Propagacja promienia wewnątrz kryształu do wyjścia
-    Ray r_int(hit_in.p + d_int * 0.001f, d_int);
-    HitRecord hit_out;
-    if (!crystal->hit(r_int, 0.001f, 1e9f, hit_out)) {
-        res.p_exit = hit_in.p + d_int * 0.1f;
-        res.n_exit = hit_in.normal;
-        res.dir_exit = d_int;
+    Vec3 cur_p = hit_in.p;
+    Vec3 cur_d = d_int;
+    float total_path = 0.0f;
+
+    // Do 4 wewnętrznych odbić fasetowych diamentu/kryształu (TIR)
+    for (int internal_bounce = 0; internal_bounce < 4; ++internal_bounce) {
+        Ray r_int(cur_p + cur_d * 0.001f, cur_d);
+        HitRecord hit_out;
+        if (!crystal->hit(r_int, 0.001f, 1e9f, hit_out)) {
+            res.p_exit = cur_p + cur_d * 0.05f;
+            res.n_exit = hit_in.normal;
+            res.dir_exit = cur_d;
+            res.path_length = total_path;
+            return res;
+        }
+
+        total_path += (hit_out.p - cur_p).length();
+        Vec3 unit_cur_d = unit_vector(cur_d);
+        float cos_out = std::fmin(dot(-unit_cur_d, hit_out.normal), 1.0f);
+        float sin_out = std::sqrt(std::max(0.0f, 1.0f - cos_out * cos_out));
+
+        float eta_out = ior;
+        if (eta_out * sin_out > 1.0f) {
+            // Całkowite odbicie wewnętrzne (TIR) wewnątrz kryształu
+            cur_p = hit_out.p;
+            cur_d = unit_vector(reflect(unit_cur_d, hit_out.normal));
+            continue;
+        }
+
+        // Wyjście z kryształu do powietrza (załamanie na ścianie wyjściowej)
+        Vec3 d_out = refract(unit_cur_d, hit_out.normal, eta_out);
+        res.p_exit = hit_out.p;
+        res.n_exit = hit_out.normal;
+        res.dir_exit = unit_vector(d_out);
+        res.path_length = total_path;
         return res;
     }
 
-    res.p_exit = hit_out.p;
-    res.n_exit = hit_out.normal;
-    res.path_length = (hit_out.p - hit_in.p).length();
-
-    Vec3 unit_int = unit_vector(d_int);
-    float cos_out = std::fmin(dot(-unit_int, hit_out.normal), 1.0f);
-    float sin_out = std::sqrt(std::max(0.0f, 1.0f - cos_out * cos_out));
-
-    float eta_out = ior;
-    Vec3 d_out;
-    if (eta_out * sin_out > 1.0f) {
-        d_out = reflect(unit_int, hit_out.normal);
-    } else {
-        d_out = refract(unit_int, hit_out.normal, eta_out);
-    }
-    res.dir_exit = unit_vector(d_out);
-
+    res.p_exit = cur_p;
+    res.n_exit = hit_in.normal;
+    res.dir_exit = cur_d;
+    res.path_length = total_path;
     return res;
 }
 
 // Algorytm WALKMANIFOLD (Jakob & Marschner 2012, Rysunek 4 & Sekcja 4):
-// Iteracyjny predyktor-korektor (metoda Newtona) na rozmaitości zwierciadlanej C(x)=0.
+// Wysoce zoptymalizowana metoda Newtona-Raphsona o kwadratowej zbieżności na rozmaitości zwierciadlanej C(x)=0.
 inline bool WalkSpecularManifold(
     const Vec3& origin,
     Vec3& inout_dir,
@@ -1035,8 +1077,8 @@ inline bool WalkSpecularManifold(
     const Vec3& target_point,
     const Vec3& target_normal,
     Vec3& out_final_hit,
-    float tolerance = 1e-3f,
-    int max_iters = 15
+    float tolerance = 2e-3f,
+    int max_iters = 4
 ) {
     if (!crystal) return false;
 
@@ -1045,7 +1087,7 @@ inline bool WalkSpecularManifold(
 
     for (int iter = 0; iter < max_iters; ++iter) {
         Ray r_cur(origin, cur_dir);
-        auto spec = TraceThroughCrystal(r_cur, crystal, 1.55f);
+        auto spec = TraceThroughCrystal(r_cur, crystal, 1.530f);
         if (!spec.hit) return false;
 
         float denom = dot(spec.dir_exit, target_normal);
@@ -1074,8 +1116,8 @@ inline bool WalkSpecularManifold(
         Ray r_u(origin, unit_vector(cur_dir + h * U));
         Ray r_v(origin, unit_vector(cur_dir + h * V));
 
-        auto spec_u = TraceThroughCrystal(r_u, crystal, 1.55f);
-        auto spec_v = TraceThroughCrystal(r_v, crystal, 1.55f);
+        auto spec_u = TraceThroughCrystal(r_u, crystal, 1.530f);
+        auto spec_v = TraceThroughCrystal(r_v, crystal, 1.530f);
         if (!spec_u.hit || !spec_v.hit) return false;
 
         float denom_u = dot(spec_u.dir_exit, target_normal);
@@ -1105,12 +1147,17 @@ inline bool WalkSpecularManifold(
         float du = (c * ru - b * rv) / det;
         float dv = (a * rv - b * ru) / det;
 
-        // Krok predykcji w przestrzeni stycznej rozmaitości:
+        // Krok predykcji w przestrzeni stycznej rozmaitości z tłumieniem skoków:
+        if (du * du + dv * dv > 4.0f) {
+            float s = 2.0f / std::sqrt(du * du + dv * dv);
+            du *= s;
+            dv *= s;
+        }
         Vec3 next_dir = unit_vector(cur_dir + beta * (du * U + dv * V));
 
         // Krok korekcji: rzutowanie z powrotem na rozmaitość przez raytracing
         Ray r_next(origin, next_dir);
-        auto spec_next = TraceThroughCrystal(r_next, crystal, 1.55f);
+        auto spec_next = TraceThroughCrystal(r_next, crystal, 1.530f);
         if (spec_next.hit) {
             float d_next = dot(spec_next.dir_exit, target_normal);
             if (std::fabs(d_next) > 1e-5f) {
@@ -1120,7 +1167,7 @@ inline bool WalkSpecularManifold(
                     float next_err = (target_point - hit_next).length();
                     if (next_err < err) {
                         cur_dir = next_dir;
-                        beta = std::min(1.0f, 2.0f * beta);
+                        beta = std::min(1.0f, 1.5f * beta);
                         continue;
                     }
                 }
@@ -2176,24 +2223,47 @@ void StartRendering() {
 
         PhotonMap photon_map;
         if ((algo == 1 || algo == 2 || algo == 3) && glass_crystal && !light_sources.empty()) {
-            photon_map.init(0.06f, -6.0f, 6.0f, -6.0f, 6.0f);
+            // Fine spatial cell size 0.020f dla ostrej, szczegółowej kaustyki fasetkowej
+            photon_map.init(0.020f, -6.0f, 6.0f, -6.0f, 6.0f);
 
             const auto& light = light_sources[0];
             Vec3 crystal_center = glass_crystal->center;
-            float bound_r = crystal_radius * 1.35f;
+            float bound_r = crystal_radius * 1.25f;
 
             Vec3 light_to_cryst = crystal_center - light.center;
             float dist_lc = light_to_cryst.length();
-            Vec3 dir_lc = light_to_cryst / dist_lc;
+            Vec3 dir_lc = light_to_cryst / (dist_lc > 1e-4f ? dist_lc : 1.0f);
 
             Vec3 up(0.0f, 1.0f, 0.0f);
             if (std::fabs(dir_lc.y) > 0.9f) up = Vec3(1.0f, 0.0f, 0.0f);
             Vec3 right = unit_vector(cross(dir_lc, up));
             Vec3 v_up = cross(right, dir_lc);
 
-            float solid_angle = (3.14159f * bound_r * bound_r) / (dist_lc * dist_lc + 0.1f);
+            float r_light = light.radius;
             Vec3 emit_power = light.mat->emitted(light.center);
-            Vec3 photon_flux_base = emit_power * (solid_angle * 4.0f * 3.14159f * light.radius * light.radius / static_cast<float>(photons));
+
+            // Fizyczne obliczenie strumienia energii w stożku emisji:
+            Vec3 photon_flux_base;
+            if (g_current_scene == 0) {
+                // Scena 1 (Otwarta): emisja bezpośrednio w dysk otaczający kryształ
+                float solid_angle = (3.14159265f * bound_r * bound_r) / (dist_lc * dist_lc + 0.01f);
+                float cone_fraction = solid_angle / (4.0f * 3.14159265f);
+                Vec3 total_cone_flux = emit_power * (4.0f * 3.14159265f * 3.14159265f * r_light * r_light * cone_fraction);
+                photon_flux_base = total_cone_flux / static_cast<float>(photons);
+            } else {
+                // Scena 2 (Zamknięty pokój): światło -> lustro zewnętrzne (Z=3.2) -> szczelina okienna (Z=1.4) -> kryształ
+                float mirror_w = 1.1f;
+                float mirror_h = 0.9f;
+                float mirror_area = mirror_w * mirror_h;
+                Vec3 mirror_target(1.35f, 1.65f, 3.2f);
+                float dist_lm = (mirror_target - light.center).length();
+                Vec3 dir_lm = unit_vector(mirror_target - light.center);
+                float cos_mir = std::fabs(dir_lm.z);
+                float solid_angle_mir = (mirror_area * cos_mir) / (dist_lm * dist_lm + 0.01f);
+                float cone_fraction = solid_angle_mir / (4.0f * 3.14159265f);
+                Vec3 total_cone_flux = emit_power * (4.0f * 3.14159265f * 3.14159265f * r_light * r_light * cone_fraction);
+                photon_flux_base = total_cone_flux / static_cast<float>(photons);
+            }
 
             unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
             int photons_per_thread = photons / num_threads;
@@ -2211,21 +2281,56 @@ void StartRendering() {
                     local_photons.reserve(photons_per_thread / 2);
 
                     for (int i = 0; i < photons_per_thread && !g_cancel_render.load(); ++i) {
-                        Vec3 p_light = light.center + light.radius * random_unit_vector(rng);
+                        // Rozszczepienie chromatyczne (Cauchy Dispersion): 3 kanały spektralne R, G, B
+                        int spec_ch = i % 3;
+                        float ior = (spec_ch == 0) ? 1.515f : ((spec_ch == 1) ? 1.530f : 1.555f);
+                        Vec3 ch_tint = (spec_ch == 0) ? Vec3(3.0f, 0.0f, 0.0f) :
+                                       ((spec_ch == 1) ? Vec3(0.0f, 3.0f, 0.0f) : Vec3(0.0f, 0.0f, 3.0f));
+                        Vec3 cur_flux = photon_flux_base * ch_tint;
 
-                        float r_disk = bound_r * std::sqrt(dist01(rng));
-                        float th_angle = d_theta(rng);
-                        Vec3 target = crystal_center + right * (r_disk * std::cos(th_angle)) + v_up * (r_disk * std::sin(th_angle));
-                        Vec3 dir = unit_vector(target - p_light);
+                        Ray cur_ray;
 
-                        Ray cur_ray(p_light, dir);
-                        Vec3 cur_flux = photon_flux_base;
+                        if (g_current_scene == 0) {
+                            Vec3 p_light = light.center + light.radius * random_unit_vector(rng);
+                            float r_disk = bound_r * std::sqrt(dist01(rng));
+                            float th_angle = d_theta(rng);
+                            Vec3 target = crystal_center + right * (r_disk * std::cos(th_angle)) + v_up * (r_disk * std::sin(th_angle));
+                            Vec3 dir = unit_vector(target - p_light);
+                            cur_ray = Ray(p_light, dir);
+                        } else {
+                            // Emisja na zewnętrzne lustro przy Z=3.2
+                            Vec3 p_light = light.center + light.radius * random_unit_vector(rng);
+                            float mx = 0.8f + dist01(rng) * 1.1f;
+                            float my = 1.2f + dist01(rng) * 0.9f;
+                            Vec3 p_mir(mx, my, 3.2f);
+                            Vec3 dir_to_mir = unit_vector(p_mir - p_light);
 
+                            // Odbicie lustrzane od płaszczyzny Z=3.2 z normalną (0, 0, -1)
+                            Vec3 dir_refl = Vec3(dir_to_mir.x, dir_to_mir.y, -std::fabs(dir_to_mir.z));
+                            cur_ray = Ray(p_mir + dir_refl * 0.002f, dir_refl);
+
+                            // Propagacja promienia z lustra w stronę szczeliny okna przy Z=1.4
+                            HitRecord hit_room;
+                            if (!world.hit(cur_ray, 0.001f, 1e9f, hit_room)) continue;
+
+                            // Jeśli promień trafił prosto w kryształ szklany:
+                            if (hit_room.mat && hit_room.mat->is_dielectric()) {
+                                cur_ray = Ray(hit_room.p - hit_room.normal * 0.002f, cur_ray.direction);
+                            } else {
+                                // Trafienie w podłogę pokoju lub ramę okna bezpośrednim światłem
+                                if (!hit_room.mat->is_specular() && hit_room.mat->emitted(hit_room.p).near_zero()) {
+                                    local_photons.push_back({hit_room.p, cur_flux * 0.20f});
+                                }
+                                continue;
+                            }
+                        }
+
+                        // Załamanie światła wewnątrz kryształu z dyspersją chromatyczną
                         for (int bounce = 0; bounce < 8; ++bounce) {
                             HitRecord hit;
                             if (!glass_crystal->hit(cur_ray, 0.001f, 1e9f, hit)) break;
 
-                            float ref_idx = hit.front_face ? (1.0f / 1.55f) : 1.55f;
+                            float ref_idx = hit.front_face ? (1.0f / ior) : ior;
                             Vec3 unit_dir = unit_vector(cur_ray.direction);
                             float cos_theta = std::fmin(dot(-unit_dir, hit.normal), 1.0f);
                             float sin_theta = std::sqrt(std::max(0.0f, 1.0f - cos_theta * cos_theta));
@@ -2243,13 +2348,11 @@ void StartRendering() {
                             cur_ray = Ray(hit.p + next_dir * 0.0015f, unit_vector(next_dir));
                         }
 
+                        // Promień opuścił kryształ - odłożenie fotonu kaustyki na podłożu
                         HitRecord floor_hit;
                         if (world.hit(cur_ray, 0.001f, 1e9f, floor_hit)) {
                             if (!floor_hit.mat->is_specular() && floor_hit.mat->emitted(floor_hit.p).near_zero()) {
-                                float cos_surf = std::fmax(0.0f, dot(floor_hit.normal, -cur_ray.direction));
-                                if (cos_surf > 0.02f) {
-                                    local_photons.push_back({floor_hit.p, cur_flux * (cos_surf * 0.35f)});
-                                }
+                                local_photons.push_back({floor_hit.p, cur_flux});
                             }
                         }
                     }
@@ -2387,10 +2490,10 @@ void StartRendering() {
                             for (size_t k = 0; k < MLT_DIM; ++k) u_prop[k] = dist01(rng);
                         } else {
                             bool did_manifold = false;
-                            if (algo == 3 && glass_crystal && dist01(rng) < 0.50f) {
+                            if (algo == 3 && glass_crystal && dist01(rng) < 0.35f) {
                                 // Manifold Exploration Perturbation (Jakob & Marschner 2012, Sekcja 5.1 & Rysunek 5 i 6)
                                 Ray cur_cam_ray = cam.get_ray(cur_x.u[0], 1.0f - cur_x.u[1]);
-                                auto spec_test = TraceThroughCrystal(cur_cam_ray, glass_crystal, 1.55f);
+                                auto spec_test = TraceThroughCrystal(cur_cam_ray, glass_crystal, 1.530f);
                                 if (spec_test.hit) {
                                     Vec3 target_n(0.0f, 1.0f, 0.0f);
                                     float d_plane = dot(spec_test.dir_exit, target_n);
@@ -2399,13 +2502,14 @@ void StartRendering() {
                                         if (tp > 0.001f) {
                                             Vec3 hit_p = spec_test.p_exit + spec_test.dir_exit * tp;
 
-                                            // Perturbacja celu na płaszczyźnie podłoża wg parametru lambda
-                                            std::normal_distribution<float> norm_dist(0.0f, 0.035f);
+                                            // Perturbacja celu na płaszczyźnie podłoża wg parametru lambda (ostra rozdzielczość kaustyki)
+                                            std::normal_distribution<float> norm_dist(0.0f, 0.020f);
                                             Vec3 perturbed_target = hit_p + Vec3(norm_dist(rng), 0.0f, norm_dist(rng));
 
                                             Vec3 walked_dir = cur_cam_ray.direction;
                                             Vec3 final_p;
-                                            if (WalkSpecularManifold(cam.origin, walked_dir, glass_crystal, perturbed_target, target_n, final_p, 2e-3f, 12)) {
+                                            // 4 iteracje metody Newtona wystarczają dzięki kwadratowej zbieżności
+                                            if (WalkSpecularManifold(cam.origin, walked_dir, glass_crystal, perturbed_target, target_n, final_p, 2e-3f, 4)) {
                                                 float new_s = 0.0f, new_t = 0.0f;
                                                 if (cam.project_direction(walked_dir, new_s, new_t)) {
                                                     u_prop = cur_x.u;
