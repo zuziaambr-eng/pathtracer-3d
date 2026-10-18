@@ -22,6 +22,7 @@
 #include <queue>
 #include <condition_variable>
 #include <functional>
+#include <OpenImageDenoise/oidn.hpp>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -1200,11 +1201,16 @@ inline bool WalkSpecularManifold(
         float ru = dot(diff, Ju);
         float rv = dot(diff, Jv);
 
-        float det = a * c - b * b;
+        // Regularyzacja Levenberga-Marquardta (zapobiega osobliwościom na liniach ogniskowych kaustyki)
+        float lambda_d = 1e-4f * (a + c);
+        float a_d = a + lambda_d;
+        float c_d = c + lambda_d;
+
+        float det = a_d * c_d - b * b;
         if (det < 1e-12f) return false;
 
-        float du = (c * ru - b * rv) / det;
-        float dv = (a * rv - b * ru) / det;
+        float du = (c_d * ru - b * rv) / det;
+        float dv = (a_d * rv - b * ru) / det;
 
         // Krok predykcji w przestrzeni stycznej rozmaitości z tłumieniem skoków:
         if (du * du + dv * dv > 4.0f) {
@@ -1374,6 +1380,8 @@ constexpr int IDC_EDIT_MAT_PARAM = 1029;
 constexpr int IDC_BTN_APPLY_MAT  = 1030;
 constexpr int IDC_BTN_EXPORT_OBJ = 1031;
 constexpr int IDC_EDIT_MAT_DISP  = 1032;
+constexpr int IDC_CHK_DENOISE    = 1033;
+constexpr int IDC_BTN_DENOISE_NOW= 1034;
 
 int g_current_scene  = 0;
 int g_render_width   = 800;
@@ -1388,7 +1396,13 @@ std::atomic<int> g_cur_buf_h(450);
 
 std::vector<uint32_t> g_display_buffer(800 * 450, 0xFF18181B);
 std::vector<Vec3>     g_raw_image(800 * 450, Vec3(0, 0, 0));
+std::vector<Vec3>     g_unfiltered_raw_image;
+bool                  g_is_currently_denoised = false;
 std::vector<int>      g_sample_counts(800 * 450, 0);
+
+// Flagi stanu renderowania i odszumiania Intel OIDN:
+std::atomic<bool>     g_enable_oidn(true);
+std::atomic<bool>     g_has_rendered_image(false);
 
 // Struktury dla Metropolis Light Transport (MLT):
 std::atomic<size_t> g_mlt_total_mutations(0);
@@ -1402,6 +1416,50 @@ std::atomic<bool>   g_cancel_render(false);
 std::atomic<size_t> g_completed_tiles(0);
 size_t              g_total_tiles = 0;
 std::chrono::high_resolution_clock::time_point g_render_start_time;
+
+// Funkcja odszumiania obrazu z wykorzystaniem Intel Open Image Denoise (OIDN v2.5.1)
+inline bool RunIntelOIDN(std::vector<Vec3>& film, int width, int height) {
+    if (film.size() < static_cast<size_t>(width * height) || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    try {
+        oidn::DeviceRef device = oidn::newDevice(oidn::DeviceType::CPU);
+        device.commit();
+
+        std::vector<float> color(width * height * 3);
+        for (int i = 0; i < width * height; ++i) {
+            color[i * 3 + 0] = std::max(0.0f, film[i].x);
+            color[i * 3 + 1] = std::max(0.0f, film[i].y);
+            color[i * 3 + 2] = std::max(0.0f, film[i].z);
+        }
+
+        std::vector<float> output(width * height * 3);
+
+        oidn::FilterRef filter = device.newFilter("RT");
+        filter.setImage("color", color.data(), oidn::Format::Float3, width, height);
+        filter.setImage("output", output.data(), oidn::Format::Float3, width, height);
+        filter.set("hdr", true);
+        filter.set("cleanAux", true);
+        filter.commit();
+
+        filter.execute();
+
+        const char* errorMessage = nullptr;
+        if (device.getError(errorMessage) != oidn::Error::None) {
+            return false;
+        }
+
+        for (int i = 0; i < width * height; ++i) {
+            film[i] = Vec3(std::max(0.0f, output[i * 3 + 0]),
+                           std::max(0.0f, output[i * 3 + 1]),
+                           std::max(0.0f, output[i * 3 + 2]));
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 std::vector<EditableSceneObject> g_scene_objects = {
     make_crystal(L"1. Krysztal Szklany (Faceted Crystal)", Vec3(-0.5f, 0.70f, 0.1f), 0.65f, 1.40f, 1.55f),
@@ -1473,6 +1531,8 @@ HWND g_hLblDepth     = nullptr;
 HWND g_hEditDepth    = nullptr;
 HWND g_hBtnRender    = nullptr;
 HWND g_hBtnStop      = nullptr;
+HWND g_hChkDenoise   = nullptr;
+HWND g_hBtnDenoiseNow= nullptr;
 
 HWND g_hGroupObj     = nullptr;
 HWND g_hLblObj       = nullptr;
@@ -2035,12 +2095,14 @@ void ImportOBJModel() {
                  baseName.c_str(), mesh_obj.mesh_triangles->size());
         SetWindowTextW(g_hStatusLabel, status);
 
+        g_has_rendered_image.store(false);
         RenderFastPreview();
         if (g_hCanvas) InvalidateRect(g_hCanvas, NULL, FALSE);
     }
 }
 
 void SwitchScene(int scene_id) {
+    g_has_rendered_image.store(false);
     g_current_scene = scene_id;
 
     if (scene_id == 0) {
@@ -2326,6 +2388,7 @@ void ProcessScaleMove(int mx, int my) {
 }
 
 void ResetCamera() {
+    g_has_rendered_image.store(false);
     if (g_current_scene == 0) {
         g_cam_target   = Vec3(-0.3f, 0.5f, 0.0f);
         g_cam_distance = 4.6f;
@@ -2400,6 +2463,7 @@ void OnResolutionComboChanged() {
 
 void StartRendering() {
     if (g_is_rendering.load()) return;
+    g_has_rendered_image.store(false);
     if (g_is_grabbing) ConfirmGrabMode();
     if (g_is_scaling)  ConfirmScaleMode();
 
@@ -2445,9 +2509,10 @@ void StartRendering() {
     // Ustawienie dokładnych wymiarów bufora w pamięci dla renderera
     g_cur_buf_w.store(g_render_width);
     g_cur_buf_h.store(g_render_height);
-    g_display_buffer.assign(g_render_width * g_render_height, 0xFF18181B);
-    g_raw_image.assign(g_render_width * g_render_height, Vec3(0, 0, 0));
-    g_sample_counts.assign(g_render_width * g_render_height, 0);
+    size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
+    g_display_buffer.assign(total_pixels, 0xFF18181B);
+    g_raw_image.assign(total_pixels, Vec3(0, 0, 0));
+    g_sample_counts.assign(total_pixels, 0);
 
     std::vector<Tile> tiles;
     for (int y = 0; y < g_render_height; y += g_tile_size) {
@@ -2504,7 +2569,7 @@ void StartRendering() {
 
     int algo = g_render_algo;
 
-    std::thread([tiles, spp, max_depth, algo, photons]() {
+    std::thread([tiles, spp, max_depth, algo, photons, total_pixels]() {
         HittableList world;
         std::vector<Sphere> light_sources;
         std::shared_ptr<ConvexPolyhedron> glass_crystal = nullptr;
@@ -2792,7 +2857,13 @@ void StartRendering() {
                         cur_x.lum = color_luminance(cur_x.col);
                     }
 
+                    size_t chunk_size = 20000;
+                    size_t steps_in_chunk = 0;
+
                     std::vector<Vec3> local_film(total_pixels, Vec3(0, 0, 0));
+                    std::vector<uint32_t> touched_pixels;
+                    touched_pixels.reserve(chunk_size * 2);
+                    std::vector<uint8_t> pixel_touched(total_pixels, 0);
                     std::vector<float> u_prop(MLT_DIM);
 
                     int width = g_render_width;
@@ -2804,9 +2875,6 @@ void StartRendering() {
                     float theta2 = 0.1f;
                     float log_theta = std::log(theta2 / theta1);
 
-                    size_t chunk_size = 20000;
-                    size_t steps_in_chunk = 0;
-
                     for (size_t m = 0; m < mutations_per_thread && !g_cancel_render.load(); ++m) {
                         bool is_large = (dist01(rng) < 0.20f);
 
@@ -2815,7 +2883,7 @@ void StartRendering() {
                             for (size_t k = 0; k < MLT_DIM; ++k) u_prop[k] = dist01(rng);
                         } else {
                             bool did_manifold = false;
-                            if (algo == 3 && glass_crystal && dist01(rng) < 0.35f) {
+                            if (algo == 3 && glass_crystal && dist01(rng) < 0.50f) {
                                 // Manifold Exploration Perturbation (Jakob & Marschner 2012, Sekcja 5.1 & Rysunek 5 i 6)
                                 Ray cur_cam_ray = cam.get_ray(cur_x.u[0], 1.0f - cur_x.u[1]);
                                 float path_ior = crystal_ior;
@@ -2824,38 +2892,41 @@ void StartRendering() {
                                 }
                                 auto spec_test = TraceThroughCrystal(cur_cam_ray, glass_crystal, path_ior);
                                 if (spec_test.hit) {
-                                    Vec3 target_n(0.0f, 1.0f, 0.0f);
-                                    float d_plane = dot(spec_test.dir_exit, target_n);
-                                    if (std::fabs(d_plane) > 1e-4f) {
-                                        float tp = -spec_test.p_exit.y / d_plane;
-                                        if (tp > 0.001f) {
-                                            Vec3 hit_p = spec_test.p_exit + spec_test.dir_exit * tp;
+                                    // Zamiast zakładać stałą podłogę Y=0, sprawdzamy gdzie promień wyjściowy trafia w scenie:
+                                    Ray exit_ray(spec_test.p_exit + spec_test.dir_exit * 0.001f, spec_test.dir_exit);
+                                    HitRecord hit_rec;
+                                    if (world.hit(exit_ray, 0.001f, 1e9f, hit_rec) && !hit_rec.mat->is_specular()) {
+                                        Vec3 hit_p = hit_rec.p;
+                                        Vec3 target_n = hit_rec.normal;
 
-                                            // Perturbacja celu na płaszczyźnie podłoża wg parametru lambda (ostra rozdzielczość kaustyki)
-                                            std::normal_distribution<float> norm_dist(0.0f, 0.020f);
-                                            Vec3 perturbed_target = hit_p + Vec3(norm_dist(rng), 0.0f, norm_dist(rng));
+                                        // Dwuskala perturbacji celu: drobna (70%) dla ostrych krawędzi, szersza (30%) dla przeskakiwania fasetek
+                                        float step_scale = (dist01(rng) < 0.70f) ? 0.015f : 0.060f;
+                                        std::normal_distribution<float> norm_dist(0.0f, step_scale);
+                                        Vec3 tangent_u = (std::fabs(target_n.y) > 0.9f) ? Vec3(1.0f, 0.0f, 0.0f) : Vec3(0.0f, 1.0f, 0.0f);
+                                        Vec3 T = unit_vector(cross(target_n, tangent_u));
+                                        Vec3 B = cross(target_n, T);
+                                        Vec3 perturbed_target = hit_p + T * norm_dist(rng) + B * norm_dist(rng);
 
-                                            // Perturbacja spektralna wzdłuż rozmaitości dyspersyjnej:
-                                            float prop_wl = cur_x.u[2];
-                                            float walked_ior = path_ior;
-                                            if (crystal_dispersion > 1e-4f) {
-                                                std::normal_distribution<float> wl_dist(0.0f, 0.035f);
-                                                prop_wl = std::clamp(cur_x.u[2] + wl_dist(rng), 0.0f, 1.0f);
-                                                walked_ior = crystal_ior + (2.0f * prop_wl - 1.0f) * crystal_dispersion;
-                                            }
+                                        // Perturbacja spektralna wzdłuż rozmaitości dyspersyjnej:
+                                        float prop_wl = cur_x.u[2];
+                                        float walked_ior = path_ior;
+                                        if (crystal_dispersion > 1e-4f) {
+                                            std::normal_distribution<float> wl_dist(0.0f, 0.035f);
+                                            prop_wl = std::clamp(cur_x.u[2] + wl_dist(rng), 0.0f, 1.0f);
+                                            walked_ior = crystal_ior + (2.0f * prop_wl - 1.0f) * crystal_dispersion;
+                                        }
 
-                                            Vec3 walked_dir = cur_cam_ray.direction;
-                                            Vec3 final_p;
-                                            // 4 iteracje metody Newtona wystarczają dzięki kwadratowej zbieżności
-                                            if (WalkSpecularManifold(cam.origin, walked_dir, glass_crystal, perturbed_target, target_n, final_p, 2e-3f, 4, walked_ior)) {
-                                                float new_s = 0.0f, new_t = 0.0f;
-                                                if (cam.project_direction(walked_dir, new_s, new_t)) {
-                                                    u_prop = cur_x.u;
-                                                    u_prop[0] = std::clamp(new_s, 0.0f, 0.999999f);
-                                                    u_prop[1] = std::clamp(1.0f - new_t, 0.0f, 0.999999f);
-                                                    u_prop[2] = prop_wl;
-                                                    did_manifold = true;
-                                                }
+                                        Vec3 walked_dir = cur_cam_ray.direction;
+                                        Vec3 final_p;
+                                        // 4 iteracje metody Newtona wystarczają dzięki kwadratowej zbieżności
+                                        if (WalkSpecularManifold(cam.origin, walked_dir, glass_crystal, perturbed_target, target_n, final_p, 2e-3f, 4, walked_ior)) {
+                                            float new_s = 0.0f, new_t = 0.0f;
+                                            if (cam.project_direction(walked_dir, new_s, new_t)) {
+                                                u_prop = cur_x.u;
+                                                u_prop[0] = std::clamp(new_s, 0.0f, 0.999999f);
+                                                u_prop[1] = std::clamp(1.0f - new_t, 0.0f, 0.999999f);
+                                                u_prop[2] = prop_wl;
+                                                did_manifold = true;
                                             }
                                         }
                                     }
@@ -2901,6 +2972,10 @@ void StartRendering() {
                             int py_y = std::clamp(static_cast<int>(u_prop[1] * height), 0, height - 1);
                             int idx_y = py_y * width + px_y;
                             local_film[idx_y] = local_film[idx_y] + (col_prop / lum_prop) * A;
+                            if (!pixel_touched[idx_y]) {
+                                pixel_touched[idx_y] = 1;
+                                touched_pixels.push_back(static_cast<uint32_t>(idx_y));
+                            }
                         }
 
                         if (cur_x.lum > 1e-7f && (1.0f - A) > 1e-7f) {
@@ -2908,6 +2983,10 @@ void StartRendering() {
                             int py_x = std::clamp(static_cast<int>(cur_x.u[1] * height), 0, height - 1);
                             int idx_x = py_x * width + px_x;
                             local_film[idx_x] = local_film[idx_x] + (cur_x.col / cur_x.lum) * (1.0f - A);
+                            if (!pixel_touched[idx_x]) {
+                                pixel_touched[idx_x] = 1;
+                                touched_pixels.push_back(static_cast<uint32_t>(idx_x));
+                            }
                         }
 
                         // Warunek akceptacji wg Detailed Balance (Równanie 2)
@@ -2921,22 +3000,27 @@ void StartRendering() {
                         if (steps_in_chunk >= chunk_size) {
                             {
                                 std::lock_guard<std::mutex> lock(g_mlt_mutex);
-                                for (size_t p = 0; p < total_pixels; ++p) {
+                                for (uint32_t p : touched_pixels) {
                                     g_mlt_accum[p] = g_mlt_accum[p] + local_film[p];
                                     local_film[p] = Vec3(0, 0, 0);
+                                    pixel_touched[p] = 0;
                                 }
                                 g_mlt_mutations_done.fetch_add(steps_in_chunk);
                             }
+                            touched_pixels.clear();
                             steps_in_chunk = 0;
                         }
                     }
 
                     if (steps_in_chunk > 0) {
                         std::lock_guard<std::mutex> lock(g_mlt_mutex);
-                        for (size_t p = 0; p < total_pixels; ++p) {
+                        for (uint32_t p : touched_pixels) {
                             g_mlt_accum[p] = g_mlt_accum[p] + local_film[p];
+                            local_film[p] = Vec3(0, 0, 0);
+                            pixel_touched[p] = 0;
                         }
                         g_mlt_mutations_done.fetch_add(steps_in_chunk);
+                        touched_pixels.clear();
                     }
                 });
             }
@@ -2954,19 +3038,8 @@ void StartRendering() {
                     Vec3 rad = g_mlt_accum[i] * scale;
                     g_raw_image[i] = rad;
                     g_sample_counts[i] = 1;
-
-                    float cr = std::clamp(std::sqrt(rad.x), 0.0f, 0.999f);
-                    float cg = std::clamp(std::sqrt(rad.y), 0.0f, 0.999f);
-                    float cb = std::clamp(std::sqrt(rad.z), 0.0f, 0.999f);
-
-                    uint8_t ir = static_cast<uint8_t>(256.0f * cr);
-                    uint8_t ig = static_cast<uint8_t>(256.0f * cg);
-                    uint8_t ib = static_cast<uint8_t>(256.0f * cb);
-
-                    g_display_buffer[i] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
                 }
             }
-            g_is_rendering.store(false);
         } else {
             // ================================================================
             // KAFELKOWY STANDARDOWY PT LUB BDPT
@@ -3046,8 +3119,49 @@ void StartRendering() {
                 if (worker.joinable()) worker.join();
             }
 
-            g_is_rendering.store(false);
+            // Normalizacja sumy próbek do uśrednionej radiancji
+            for (size_t i = 0; i < total_pixels; ++i) {
+                if (g_sample_counts[i] > 0) {
+                    g_raw_image[i] = g_raw_image[i] / static_cast<float>(g_sample_counts[i]);
+                    g_sample_counts[i] = 1;
+                }
+            }
         }
+
+        // ================================================================
+        // POST-PROCESSING: INTEL OPEN IMAGE DENOISE (OIDN) & DISPLAY BUFFER
+        // ================================================================
+        if (!g_cancel_render.load()) {
+            g_unfiltered_raw_image = g_raw_image;
+            g_is_currently_denoised = false;
+
+            if (g_enable_oidn.load()) {
+                SetWindowTextW(g_hStatusLabel, L"Odszumianie obrazu przez sztuczna inteligencje (Intel OIDN)...");
+                std::vector<Vec3> denoised = g_raw_image;
+                if (RunIntelOIDN(denoised, g_render_width, g_render_height)) {
+                    g_raw_image = denoised;
+                    g_is_currently_denoised = true;
+                }
+            }
+
+            for (size_t i = 0; i < total_pixels; ++i) {
+                Vec3 rad = g_raw_image[i];
+                float cr = std::clamp(std::sqrt(std::max(0.0f, rad.x)), 0.0f, 0.999f);
+                float cg = std::clamp(std::sqrt(std::max(0.0f, rad.y)), 0.0f, 0.999f);
+                float cb = std::clamp(std::sqrt(std::max(0.0f, rad.z)), 0.0f, 0.999f);
+
+                uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+                uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+                uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+
+                g_display_buffer[i] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
+            }
+
+            g_has_rendered_image.store(true);
+        }
+
+        g_is_rendering.store(false);
+        InvalidateRect(g_hCanvas, NULL, FALSE);
     }).detach();
 }
 
@@ -3122,6 +3236,11 @@ void SaveToPNG() {
 LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_LBUTTONDOWN: {
+            if (g_has_rendered_image.load()) {
+                g_has_rendered_image.store(false);
+                RenderFastPreview();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
             int mx = LOWORD(lParam);
             int my = HIWORD(lParam);
             SetFocus(hWnd);
@@ -3172,6 +3291,11 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
 
         case WM_MBUTTONDOWN: {
+            if (g_has_rendered_image.load()) {
+                g_has_rendered_image.store(false);
+                RenderFastPreview();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
             int mx = LOWORD(lParam);
             int my = HIWORD(lParam);
             SetFocus(hWnd);
@@ -3198,6 +3322,9 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
 
         case WM_MOUSEWHEEL: {
+            if (g_has_rendered_image.load()) {
+                g_has_rendered_image.store(false);
+            }
             short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
             float factor = (zDelta > 0) ? 0.90f : 1.10f;
             g_cam_distance = std::clamp(g_cam_distance * factor, 0.8f, 35.0f);
@@ -3274,6 +3401,12 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
 
         case WM_KEYDOWN: {
+            if (g_has_rendered_image.load()) {
+                g_has_rendered_image.store(false);
+                RenderFastPreview();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+
             if (wParam == 'G' || wParam == 'g') {
                 if (!g_is_grabbing) StartGrabMode();
                 else ConfirmGrabMode();
@@ -3332,7 +3465,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
 
         case WM_PAINT: {
-            if (g_viewport_dirty.load() && !g_is_rendering.load()) {
+            if (g_viewport_dirty.load() && !g_is_rendering.load() && !g_has_rendered_image.load()) {
                 RenderFastPreview();
                 g_viewport_dirty.store(false);
             }
@@ -3348,8 +3481,8 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 int destW = g_canvas_view_width;
                 int destH = g_canvas_view_height;
 
-                // Centrowanie i zachowanie proporcji kadru dla aktywnego renderu Path Tracer
-                if (g_is_rendering.load()) {
+                // Centrowanie i zachowanie proporcji kadru dla aktywnego oraz ukoczonego renderu
+                if (g_is_rendering.load() || g_has_rendered_image.load()) {
                     float canvasAspect = static_cast<float>(g_canvas_view_width) / static_cast<float>(std::max(1, g_canvas_view_height));
                     float bufAspect = static_cast<float>(bufW) / static_cast<float>(bufH);
 
@@ -3406,7 +3539,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
             }
 
             // 2. Nakładki 3D (Wskaźnik zaznaczenia, osie X/Y/Z i kropkowane linie)
-            if (!g_is_rendering.load() && g_selected_object_idx >= 0 && g_selected_object_idx < static_cast<int>(g_scene_objects.size())) {
+            if (!g_is_rendering.load() && !g_has_rendered_image.load() && g_selected_object_idx >= 0 && g_selected_object_idx < static_cast<int>(g_scene_objects.size())) {
                 Camera cam = GetCurrentCamera();
                 const auto& sel_obj = g_scene_objects[g_selected_object_idx];
 
@@ -3476,7 +3609,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
             }
 
             // 3. Pasek pomocniczy HUD na dole kanwy
-            if (!g_is_rendering.load()) {
+            if (!g_is_rendering.load() && !g_has_rendered_image.load()) {
                 SetBkMode(hdc, TRANSPARENT);
                 HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
@@ -3567,7 +3700,7 @@ void ResizeLayout(int clientW, int clientH) {
 
     curY += 44;
     // 2. Grupa: Parametry renderowania
-    if (g_hGroupRender) MoveWindow(g_hGroupRender, sideX, curY, panelW, 222, TRUE);
+    if (g_hGroupRender) MoveWindow(g_hGroupRender, sideX, curY, panelW, 252, TRUE);
     curY += 20;
     if (g_hLblAlgo) MoveWindow(g_hLblAlgo, sideX + 15, curY, 95, 20, TRUE);
     if (g_hComboAlgo) MoveWindow(g_hComboAlgo, sideX + 115, curY - 2, 260, 150, TRUE);
@@ -3596,6 +3729,10 @@ void ResizeLayout(int clientW, int clientH) {
     if (g_hEditSPP) MoveWindow(g_hEditSPP, sideX + 100, curY - 2, 65, 22, TRUE);
     if (g_hLblDepth) MoveWindow(g_hLblDepth, sideX + 190, curY, 75, 20, TRUE);
     if (g_hEditDepth) MoveWindow(g_hEditDepth, sideX + 270, curY - 2, 65, 22, TRUE);
+
+    curY += 26;
+    if (g_hChkDenoise) MoveWindow(g_hChkDenoise, sideX + 15, curY, 230, 22, TRUE);
+    if (g_hBtnDenoiseNow) MoveWindow(g_hBtnDenoiseNow, sideX + 250, curY - 2, 125, 24, TRUE);
 
     curY += 30;
     if (g_hBtnRender) MoveWindow(g_hBtnRender, sideX + 15, curY, 200, 32, TRUE);
@@ -3657,8 +3794,8 @@ void ResizeLayout(int clientW, int clientH) {
     curY += 24;
     if (g_hBtnSave) MoveWindow(g_hBtnSave, sideX + 15, curY, 360, 26, TRUE);
 
-    // Renderujemy szybki podgląd tylko jeśli renderowanie PT nie trwa w tle!
-    if (!g_is_rendering.load()) {
+    // Renderujemy szybki podgląd tylko jeśli renderowanie PT nie trwa w tle i nie ma wyrenderowanego obrazu!
+    if (!g_is_rendering.load() && !g_has_rendered_image.load()) {
         RenderFastPreview();
     }
     if (g_hCanvas) InvalidateRect(g_hCanvas, NULL, FALSE);
@@ -3719,7 +3856,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // 2. Grupa: Parametry renderowania & Algorytm
             g_hGroupRender = CreateWindowW(L"BUTTON", L" Parametry renderowania & Algorytm ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                sideX, curY, 390, 222, hWnd, nullptr, nullptr, nullptr);
+                sideX, curY, 390, 252, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupRender, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 20;
@@ -3795,7 +3932,17 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditDepth = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"16", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 270, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_DEPTH, nullptr, nullptr);
             SendMessage(g_hEditDepth, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 30;
+            curY += 26;
+            g_hChkDenoise = CreateWindowW(L"BUTTON", L"Intel OIDN AI Denoise", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                sideX + 15, curY, 230, 22, hWnd, (HMENU)IDC_CHK_DENOISE, nullptr, nullptr);
+            SendMessage(g_hChkDenoise, WM_SETFONT, (WPARAM)hFont, TRUE);
+            SendMessage(g_hChkDenoise, BM_SETCHECK, BST_CHECKED, 0);
+
+            g_hBtnDenoiseNow = CreateWindowW(L"BUTTON", L"⚡ Odszum teraz", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 250, curY - 2, 125, 24, hWnd, (HMENU)IDC_BTN_DENOISE_NOW, nullptr, nullptr);
+            SendMessage(g_hBtnDenoiseNow, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            curY += 28;
             g_hBtnRender = CreateWindowW(L"BUTTON", L"▶ Rozpocznij renderowanie", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 sideX + 15, curY, 200, 32, hWnd, (HMENU)IDC_BTN_RENDER, nullptr, nullptr);
             SendMessage(g_hBtnRender, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -4011,26 +4158,27 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         std::chrono::duration<double> elapsed = now - g_render_start_time;
 
                         const wchar_t* modeTag = (g_render_algo == 3) ? L"MEMLT" : ((g_render_algo == 2) ? L"MLT" : ((g_render_algo == 1) ? L"BDPT" : L"PT"));
-                        wchar_t status[180];
+                        const wchar_t* oidnTag = g_is_currently_denoised ? L" [Intel OIDN: ON]" : L" [OIDN: OFF]";
+                        wchar_t status[220];
 
                         if (g_render_algo == 2 || g_render_algo == 3) {
                             size_t done = g_mlt_mutations_done.load();
                             size_t total = g_mlt_total_mutations.load();
                             SendMessage(g_hProgressBar, PBM_SETPOS, 1000, 0);
                             if (g_cancel_render.load()) {
-                                swprintf(status, 180, L"[%s] Renderowanie przerwane na %zu/%zu mutacjach.", modeTag, done, total);
+                                swprintf(status, 220, L"[%s] Renderowanie przerwane na %zu/%zu mutacjach.", modeTag, done, total);
                             } else {
-                                swprintf(status, 180, L"[%s] Renderowanie ukonczone w %.2f s! (%zu mutacji, %dx%d px).",
-                                         modeTag, elapsed.count(), done, g_render_width, g_render_height);
+                                swprintf(status, 220, L"[%s] Renderowanie ukonczone w %.2f s! (%zu mutacji, %dx%d px)%s.",
+                                         modeTag, elapsed.count(), done, g_render_width, g_render_height, oidnTag);
                             }
                         } else {
                             size_t done = g_completed_tiles.load();
                             SendMessage(g_hProgressBar, PBM_SETPOS, done, 0);
                             if (g_cancel_render.load()) {
-                                swprintf(status, 180, L"[%s] Renderowanie przerwane na kafelku %zu/%zu.", modeTag, done, g_total_tiles);
+                                swprintf(status, 220, L"[%s] Renderowanie przerwane na kafelku %zu/%zu.", modeTag, done, g_total_tiles);
                             } else {
-                                swprintf(status, 180, L"[%s] Renderowanie ukonczone w %.2f s! Rozdzielczosc: %dx%d px.",
-                                         modeTag, elapsed.count(), g_render_width, g_render_height);
+                                swprintf(status, 220, L"[%s] Renderowanie ukonczone w %.2f s! Rozdzielczosc: %dx%d px%s.",
+                                         modeTag, elapsed.count(), g_render_width, g_render_height, oidnTag);
                             }
                         }
 
@@ -4089,6 +4237,69 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             else if (wmId == IDC_BTN_RESET_CAM) {
                 ResetCamera();
+            }
+            else if (wmId == IDC_CHK_DENOISE) {
+                LRESULT checked = SendMessage(g_hChkDenoise, BM_GETCHECK, 0, 0);
+                g_enable_oidn.store(checked == BST_CHECKED);
+
+                if (!g_unfiltered_raw_image.empty() && !g_is_rendering.load()) {
+                    size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
+                    if (g_enable_oidn.load()) {
+                        std::vector<Vec3> denoised = g_unfiltered_raw_image;
+                        if (RunIntelOIDN(denoised, g_render_width, g_render_height)) {
+                            g_raw_image = denoised;
+                            g_is_currently_denoised = true;
+                        }
+                    } else {
+                        g_raw_image = g_unfiltered_raw_image;
+                        g_is_currently_denoised = false;
+                    }
+                    for (size_t i = 0; i < total_pixels; ++i) {
+                        Vec3 rad = g_raw_image[i];
+                        float cr = std::clamp(std::sqrt(std::max(0.0f, rad.x)), 0.0f, 0.999f);
+                        float cg = std::clamp(std::sqrt(std::max(0.0f, rad.y)), 0.0f, 0.999f);
+                        float cb = std::clamp(std::sqrt(std::max(0.0f, rad.z)), 0.0f, 0.999f);
+                        uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+                        uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+                        uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+                        g_display_buffer[i] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
+                    }
+                    InvalidateRect(g_hCanvas, NULL, FALSE);
+                    wchar_t statusBuf[180];
+                    swprintf(statusBuf, 180, L"Podglad przelaczony: %s", g_is_currently_denoised ? L"Intel OIDN Aktywny" : L"Surowy (Bez odszumiania)");
+                    SetWindowTextW(g_hStatusLabel, statusBuf);
+                }
+            }
+            else if (wmId == IDC_BTN_DENOISE_NOW) {
+                if (!g_raw_image.empty() && !g_is_rendering.load()) {
+                    if (g_unfiltered_raw_image.empty()) {
+                        g_unfiltered_raw_image = g_raw_image;
+                    }
+                    SetWindowTextW(g_hStatusLabel, L"Odszumianie obrazu przez Intel Open Image Denoise (OIDN)...");
+                    UpdateWindow(g_hStatusLabel);
+                    std::vector<Vec3> denoised = g_unfiltered_raw_image;
+                    if (RunIntelOIDN(denoised, g_render_width, g_render_height)) {
+                        g_raw_image = denoised;
+                        g_is_currently_denoised = true;
+                        SendMessage(g_hChkDenoise, BM_SETCHECK, BST_CHECKED, 0);
+                        g_enable_oidn.store(true);
+                        size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
+                        for (size_t i = 0; i < total_pixels; ++i) {
+                            Vec3 rad = g_raw_image[i];
+                            float cr = std::clamp(std::sqrt(std::max(0.0f, rad.x)), 0.0f, 0.999f);
+                            float cg = std::clamp(std::sqrt(std::max(0.0f, rad.y)), 0.0f, 0.999f);
+                            float cb = std::clamp(std::sqrt(std::max(0.0f, rad.z)), 0.0f, 0.999f);
+                            uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+                            uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+                            uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+                            g_display_buffer[i] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
+                        }
+                        InvalidateRect(g_hCanvas, NULL, FALSE);
+                        SetWindowTextW(g_hStatusLabel, L"Odszumianie ukonczone pomyslnie! (Intel OIDN)");
+                    } else {
+                        SetWindowTextW(g_hStatusLabel, L"Blad podczas odszumiania OIDN.");
+                    }
+                }
             }
             else if (wmId == IDC_BTN_RENDER) {
                 StartRendering();
