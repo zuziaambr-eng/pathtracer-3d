@@ -19,6 +19,9 @@
 #include <random>
 #include <algorithm>
 #include <cstdint>
+#include <queue>
+#include <condition_variable>
+#include <functional>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -681,7 +684,8 @@ public:
     float max_z = 6.0f;
     int grid_w = 0;
     int grid_h = 0;
-    std::vector<std::vector<uint32_t>> grid;
+    std::vector<int32_t> grid_head;
+    std::vector<int32_t> photon_next;
 
     void init(float c_size, float x0, float x1, float z0, float z1) {
         cell_size = c_size;
@@ -689,17 +693,22 @@ public:
         min_z = z0; max_z = z1;
         grid_w = static_cast<int>(std::ceil((max_x - min_x) / cell_size));
         grid_h = static_cast<int>(std::ceil((max_z - min_z) / cell_size));
-        grid.assign(grid_w * grid_h, std::vector<uint32_t>());
+        grid_head.assign(grid_w * grid_h, -1);
         photons.clear();
+        photon_next.clear();
     }
 
     void add_photon(const Vec3& p, const Vec3& flux) {
-        uint32_t idx = static_cast<uint32_t>(photons.size());
+        int32_t idx = static_cast<int32_t>(photons.size());
         photons.push_back({p, flux});
+        photon_next.push_back(-1);
+
         int gx = static_cast<int>((p.x - min_x) / cell_size);
         int gz = static_cast<int>((p.z - min_z) / cell_size);
         if (gx >= 0 && gx < grid_w && gz >= 0 && gz < grid_h) {
-            grid[gz * grid_w + gx].push_back(idx);
+            int cell_idx = gz * grid_w + gx;
+            photon_next[idx] = grid_head[cell_idx];
+            grid_head[cell_idx] = idx;
         }
     }
 
@@ -726,8 +735,8 @@ public:
         for (int gz = gz0; gz <= gz1; ++gz) {
             int row = gz * grid_w;
             for (int gx = gx0; gx <= gx1; ++gx) {
-                const auto& cell = grid[row + gx];
-                for (uint32_t p_idx : cell) {
+                int cell_idx = row + gx;
+                for (int32_t p_idx = grid_head[cell_idx]; p_idx >= 0; p_idx = photon_next[p_idx]) {
                     const auto& ph = photons[p_idx];
                     float dx = p.x - ph.pos.x;
                     float dy = p.y - ph.pos.y;
@@ -895,6 +904,7 @@ Vec3 evaluate_path_mlt(const Ray& initial_ray, const HittableList& world,
     Vec3 throughput(1.0f, 1.0f, 1.0f);
     Ray current_ray = initial_ray;
     bool last_was_specular = true;
+    float path_lambda = -1.0f;
 
     for (int bounce = 0; bounce < max_depth; ++bounce) {
         HitRecord rec;
@@ -916,7 +926,26 @@ Vec3 evaluate_path_mlt(const Ray& initial_ray, const HittableList& world,
 
         if (rec.mat->is_dielectric()) {
             auto diel = static_cast<const Dielectric*>(rec.mat.get());
-            float ref_ratio = rec.front_face ? (1.0f / diel->ir) : diel->ir;
+            float effective_ir = diel->ir;
+
+            if (diel->dispersion > 1e-4f) {
+                if (path_lambda < 0.0f) {
+                    path_lambda = sampler.get_1d();
+                    float lambda = path_lambda;
+                    float wr = std::exp(-((lambda - 0.15f) * (lambda - 0.15f)) / 0.14f);
+                    float wg = std::exp(-((lambda - 0.50f) * (lambda - 0.50f)) / 0.14f);
+                    float wb = std::exp(-((lambda - 0.85f) * (lambda - 0.85f)) / 0.14f);
+                    Vec3 spec(wr, wg, wb);
+                    float avg = (spec.x + spec.y + spec.z) / 3.0f;
+                    if (avg > 1e-4f) spec = spec / avg;
+                    float blend = std::clamp(diel->dispersion * 10.0f, 0.0f, 1.0f);
+                    Vec3 attenuation = (1.0f - blend) * Vec3(1.0f, 1.0f, 1.0f) + blend * spec;
+                    throughput = throughput * attenuation;
+                }
+                effective_ir = diel->ir + (2.0f * path_lambda - 1.0f) * diel->dispersion;
+            }
+
+            float ref_ratio = rec.front_face ? (1.0f / effective_ir) : effective_ir;
 
             Vec3 unit_dir = unit_vector(current_ray.direction);
             float cos_theta = std::fmin(dot(-unit_dir, rec.normal), 1.0f);
@@ -1107,7 +1136,8 @@ inline bool WalkSpecularManifold(
     const Vec3& target_normal,
     Vec3& out_final_hit,
     float tolerance = 2e-3f,
-    int max_iters = 4
+    int max_iters = 4,
+    float ior = 1.530f
 ) {
     if (!crystal) return false;
 
@@ -1116,7 +1146,7 @@ inline bool WalkSpecularManifold(
 
     for (int iter = 0; iter < max_iters; ++iter) {
         Ray r_cur(origin, cur_dir);
-        auto spec = TraceThroughCrystal(r_cur, crystal, 1.530f);
+        auto spec = TraceThroughCrystal(r_cur, crystal, ior);
         if (!spec.hit) return false;
 
         float denom = dot(spec.dir_exit, target_normal);
@@ -1145,8 +1175,8 @@ inline bool WalkSpecularManifold(
         Ray r_u(origin, unit_vector(cur_dir + h * U));
         Ray r_v(origin, unit_vector(cur_dir + h * V));
 
-        auto spec_u = TraceThroughCrystal(r_u, crystal, 1.530f);
-        auto spec_v = TraceThroughCrystal(r_v, crystal, 1.530f);
+        auto spec_u = TraceThroughCrystal(r_u, crystal, ior);
+        auto spec_v = TraceThroughCrystal(r_v, crystal, ior);
         if (!spec_u.hit || !spec_v.hit) return false;
 
         float denom_u = dot(spec_u.dir_exit, target_normal);
@@ -1186,7 +1216,7 @@ inline bool WalkSpecularManifold(
 
         // Krok korekcji: rzutowanie z powrotem na rozmaitość przez raytracing
         Ray r_next(origin, next_dir);
-        auto spec_next = TraceThroughCrystal(r_next, crystal, 1.530f);
+        auto spec_next = TraceThroughCrystal(r_next, crystal, ior);
         if (spec_next.hit) {
             float d_next = dot(spec_next.dir_exit, target_normal);
             if (std::fabs(d_next) > 1e-5f) {
@@ -1544,13 +1574,88 @@ int RayPickObject(int mx, int my) {
     return best_idx;
 }
 
+class ViewportThreadPool {
+public:
+    ViewportThreadPool(size_t threads = std::clamp(std::thread::hardware_concurrency(), 2u, 8u))
+        : stop(false) {
+        for (size_t i = 0; i < threads; ++i) {
+            workers.emplace_back([this]() {
+                while (true) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock<std::mutex> lock(queue_mutex);
+                        cv.wait(lock, [this]() { return stop || !tasks.empty(); });
+                        if (stop && tasks.empty()) return;
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+                    task();
+                    {
+                        std::unique_lock<std::mutex> lock(queue_mutex);
+                        active_tasks--;
+                        if (active_tasks == 0 && tasks.empty()) {
+                            done_cv.notify_all();
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    void parallel_for(int start, int end, const std::function<void(int, int)>& func) {
+        if (start >= end) return;
+        int total = end - start;
+        int num_chunks = std::min(static_cast<int>(workers.size()), total);
+        int chunk_size = (total + num_chunks - 1) / num_chunks;
+
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            active_tasks = num_chunks;
+            for (int i = 0; i < num_chunks; ++i) {
+                int c_start = start + i * chunk_size;
+                int c_end = std::min(end, c_start + chunk_size);
+                tasks.push([func, c_start, c_end]() {
+                    func(c_start, c_end);
+                });
+            }
+        }
+        cv.notify_all();
+
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        done_cv.wait(lock, [this]() { return active_tasks == 0 && tasks.empty(); });
+    }
+
+    ~ViewportThreadPool() {
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            stop = true;
+        }
+        cv.notify_all();
+        for (auto& w : workers) {
+            if (w.joinable()) w.join();
+        }
+    }
+
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    std::mutex queue_mutex;
+    std::condition_variable cv;
+    std::condition_variable done_cv;
+    size_t active_tasks = 0;
+    bool stop = false;
+};
+
+std::unique_ptr<ViewportThreadPool> g_viewport_pool;
+std::atomic<bool> g_viewport_dirty(false);
+
 void RenderFastPreview() {
     if (g_is_rendering.load()) return;
 
     Camera cam = GetCurrentCamera();
     bool is_interacting = (g_is_orbiting || g_is_panning || g_is_grabbing || g_is_scaling);
 
-    // Dynamiczna rozdzielczość podczas interaktywnego obracania/przesuwania (płynne 100+ FPS)
+    // Dynamiczna rozdzielczość podczas interaktywnego obracania/przesuwania (płynne 200+ FPS)
     int pw = is_interacting ? std::clamp(g_canvas_view_width / 3, 160, 360) : std::max(100, g_canvas_view_width / 2);
     int ph = is_interacting ? std::clamp(g_canvas_view_height / 3, 90, 200) : std::max(60, g_canvas_view_height / 2);
 
@@ -1573,98 +1678,74 @@ void RenderFastPreview() {
         }
     }
 
-    // Wielowątkowy podgląd 3D na wszystkich rdzeniach CPU
-    unsigned int num_threads = std::min(8u, std::max(2u, std::thread::hardware_concurrency()));
-    std::vector<std::thread> workers;
-    int rows_per_thread = (ph + num_threads - 1) / num_threads;
+    if (!g_viewport_pool) {
+        g_viewport_pool = std::make_unique<ViewportThreadPool>();
+    }
 
-    for (unsigned int th = 0; th < num_threads; ++th) {
-        int y_start = th * rows_per_thread;
-        int y_end = std::min(ph, y_start + rows_per_thread);
-        if (y_start >= ph) break;
+    g_viewport_pool->parallel_for(0, ph, [&](int y_start, int y_end) {
+        for (int py = y_start; py < y_end; ++py) {
+            float v = (static_cast<float>(ph - 1 - py) + 0.5f) / static_cast<float>(ph);
+            int row_offset = py * pw;
 
-        workers.emplace_back([&, y_start, y_end]() {
-            for (int py = y_start; py < y_end; ++py) {
-                float v = (static_cast<float>(ph - 1 - py) + 0.5f) / static_cast<float>(ph);
-                int row_offset = py * pw;
+            for (int px = 0; px < pw; ++px) {
+                float u = (static_cast<float>(px) + 0.5f) / static_cast<float>(pw);
+                Ray r = cam.get_ray(u, v);
 
-                for (int px = 0; px < pw; ++px) {
-                    float u = (static_cast<float>(px) + 0.5f) / static_cast<float>(pw);
-                    Ray r = cam.get_ray(u, v);
+                HitRecord rec;
+                Vec3 col;
+                if (world.hit(r, 0.001f, 1e9f, rec)) {
+                    Vec3 to_light = light_pos - rec.p;
+                    float dist_l = to_light.length();
+                    Vec3 dir_l = to_light / (dist_l > 1e-4f ? dist_l : 1.0f);
+                    float diff = std::fmax(0.15f, dot(rec.normal, dir_l));
 
-                    HitRecord rec;
-                    Vec3 col;
-                    if (world.hit(r, 0.001f, 1e9f, rec)) {
-                        Vec3 to_light = light_pos - rec.p;
-                        float dist_l = to_light.length();
-                        Vec3 dir_l = to_light / (dist_l > 1e-4f ? dist_l : 1.0f);
-                        float diff = std::fmax(0.15f, dot(rec.normal, dir_l));
+                    if (!rec.mat->emitted(rec.p).near_zero()) {
+                        col = Vec3(1.0f, 0.95f, 0.85f);
+                    } else if (rec.mat->is_dielectric()) {
+                        float rim = std::pow(1.0f - std::fabs(dot(rec.normal, -unit_vector(r.direction))), 2.5f);
+                        col = Vec3(0.12f, 0.18f, 0.28f) + Vec3(0.85f, 0.95f, 1.0f) * (rim * 0.9f);
+                    } else if (rec.mat->is_specular()) {
+                        Vec3 refl = reflect(unit_vector(r.direction), rec.normal);
+                        float spec = std::pow(std::fmax(0.0f, dot(refl, dir_l)), 16.0f);
+                        col = rec.mat->get_albedo() * diff + Vec3(1.0f, 1.0f, 1.0f) * (spec * 0.6f);
+                    } else {
+                        col = rec.mat->get_albedo() * diff;
 
-                        if (!rec.mat->emitted(rec.p).near_zero()) {
-                            col = Vec3(1.0f, 0.95f, 0.85f);
-                        } else if (rec.mat->is_dielectric()) {
-                            float rim = std::pow(1.0f - std::fabs(dot(rec.normal, -unit_vector(r.direction))), 2.5f);
-                            col = Vec3(0.12f, 0.18f, 0.28f) + Vec3(0.85f, 0.95f, 1.0f) * (rim * 0.9f);
-                        } else if (rec.mat->is_specular()) {
-                            Vec3 refl = reflect(unit_vector(r.direction), rec.normal);
-                            float spec = std::pow(std::fmax(0.0f, dot(refl, dir_l)), 16.0f);
-                            col = rec.mat->get_albedo() * diff + Vec3(1.0f, 1.0f, 1.0f) * (spec * 0.6f);
-                        } else {
-                            col = rec.mat->get_albedo() * diff;
-
-                            if (g_show_floor_grid && std::fabs(rec.p.y) < 0.05f) {
-                                float fx = std::fabs(rec.p.x - std::round(rec.p.x));
-                                float fz = std::fabs(rec.p.z - std::round(rec.p.z));
-                                if (fx < 0.035f || fz < 0.035f) {
-                                    col = col * 0.82f + Vec3(0.40f, 0.45f, 0.55f) * 0.35f;
-                                }
-                                if (std::fabs(rec.p.z) < 0.045f && std::fabs(rec.p.x) < 8.0f) {
-                                    col = Vec3(0.85f, 0.25f, 0.25f);
-                                } else if (std::fabs(rec.p.x) < 0.045f && std::fabs(rec.p.z) < 8.0f) {
-                                    col = Vec3(0.25f, 0.45f, 0.90f);
-                                }
+                        if (g_show_floor_grid && std::fabs(rec.p.y) < 0.05f) {
+                            float fx = std::fabs(rec.p.x - std::round(rec.p.x));
+                            float fz = std::fabs(rec.p.z - std::round(rec.p.z));
+                            if (fx < 0.035f || fz < 0.035f) {
+                                col = col * 0.82f + Vec3(0.40f, 0.45f, 0.55f) * 0.35f;
+                            }
+                            if (std::fabs(rec.p.z) < 0.045f && std::fabs(rec.p.x) < 8.0f) {
+                                col = Vec3(0.85f, 0.25f, 0.25f);
+                            } else if (std::fabs(rec.p.x) < 0.045f && std::fabs(rec.p.z) < 8.0f) {
+                                col = Vec3(0.25f, 0.45f, 0.90f);
                             }
                         }
-                    } else {
-                        Vec3 unit_dir = unit_vector(r.direction);
-                        float a = 0.5f * (unit_dir.y + 1.0f);
-                        col = (1.0f - a) * Vec3(0.06f, 0.08f, 0.12f) + a * Vec3(0.18f, 0.22f, 0.32f);
                     }
-
-                    float cr = std::clamp(std::sqrt(col.x), 0.0f, 0.999f);
-                    float cg = std::clamp(std::sqrt(col.y), 0.0f, 0.999f);
-                    float cb = std::clamp(std::sqrt(col.z), 0.0f, 0.999f);
-
-                    uint8_t ir = static_cast<uint8_t>(256.0f * cr);
-                    uint8_t ig = static_cast<uint8_t>(256.0f * cg);
-                    uint8_t ib = static_cast<uint8_t>(256.0f * cb);
-
-                    small_buf[row_offset + px] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
+                } else {
+                    Vec3 unit_dir = unit_vector(r.direction);
+                    float a = 0.5f * (unit_dir.y + 1.0f);
+                    col = (1.0f - a) * Vec3(0.06f, 0.08f, 0.12f) + a * Vec3(0.18f, 0.22f, 0.32f);
                 }
+
+                float cr = std::clamp(std::sqrt(col.x), 0.0f, 0.999f);
+                float cg = std::clamp(std::sqrt(col.y), 0.0f, 0.999f);
+                float cb = std::clamp(std::sqrt(col.z), 0.0f, 0.999f);
+
+                uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+                uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+                uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+
+                small_buf[row_offset + px] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
             }
-        });
-    }
-
-    for (auto& w : workers) {
-        if (w.joinable()) w.join();
-    }
-
-    g_display_buffer.assign(g_canvas_view_width * g_canvas_view_height, 0xFF18181B);
-    g_cur_buf_w.store(g_canvas_view_width);
-    g_cur_buf_h.store(g_canvas_view_height);
-
-    float x_ratio = static_cast<float>(pw) / static_cast<float>(g_canvas_view_width);
-    float y_ratio = static_cast<float>(ph) / static_cast<float>(g_canvas_view_height);
-
-    for (int y = 0; y < g_canvas_view_height; ++y) {
-        int sy = std::min(ph - 1, static_cast<int>(y * y_ratio));
-        int row_dst = y * g_canvas_view_width;
-        int row_src = sy * pw;
-        for (int x = 0; x < g_canvas_view_width; ++x) {
-            int sx = std::min(pw - 1, static_cast<int>(x * x_ratio));
-            g_display_buffer[row_dst + x] = small_buf[row_src + sx];
         }
-    }
+    });
+
+    g_display_buffer = std::move(small_buf);
+    g_cur_buf_w.store(pw);
+    g_cur_buf_h.store(ph);
 }
 
 void ExportSceneToOBJ() {
@@ -2166,7 +2247,7 @@ void ProcessGrabMove(int mx, int my) {
         g_scene_objects[g_selected_object_idx].center = new_pos;
 
         UpdateObjectFieldsFromSelection(g_selected_object_idx);
-        RenderFastPreview();
+        g_viewport_dirty.store(true);
         InvalidateRect(g_hCanvas, NULL, FALSE);
     }
 }
@@ -2239,7 +2320,7 @@ void ProcessScaleMove(int mx, int my) {
         g_scene_objects[g_selected_object_idx].radius = new_r;
 
         UpdateObjectFieldsFromSelection(g_selected_object_idx);
-        RenderFastPreview();
+        g_viewport_dirty.store(true);
         InvalidateRect(g_hCanvas, NULL, FALSE);
     }
 }
@@ -2429,6 +2510,7 @@ void StartRendering() {
         std::shared_ptr<ConvexPolyhedron> glass_crystal = nullptr;
         float crystal_radius = 0.65f;
         float crystal_dispersion = 0.02f;
+        float crystal_ior = 1.55f;
 
         if (g_current_scene == 0) {
             world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
@@ -2441,6 +2523,7 @@ void StartRendering() {
                 float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
                 crystal_radius = obj.radius;
                 crystal_dispersion = obj.mat_dispersion;
+                crystal_ior = (obj.mat_param > 0.1f) ? obj.mat_param : 1.55f;
                 glass_crystal = CreateFacetedCrystal(obj.center, obj.radius, h, obj.material);
             }
             if (obj.material && !obj.material->emitted(obj.center).near_zero()) {
@@ -2512,12 +2595,12 @@ void StartRendering() {
 
                     for (int i = 0; i < photons_per_thread && !g_cancel_render.load(); ++i) {
                         // Płynna dyspersja spektralna Cauchy'ego (bez artefaktów pojedynczych kanałów RGB):
-                        float ior = 1.530f;
+                        float ior = crystal_ior;
                         Vec3 ch_tint(1.0f, 1.0f, 1.0f);
 
                         if (crystal_dispersion > 1e-4f) {
                             float lambda = dist01(rng);
-                            ior = 1.530f + (2.0f * lambda - 1.0f) * crystal_dispersion;
+                            ior = crystal_ior + (2.0f * lambda - 1.0f) * crystal_dispersion;
                             float wr = std::exp(-((lambda - 0.15f) * (lambda - 0.15f)) / 0.14f);
                             float wg = std::exp(-((lambda - 0.50f) * (lambda - 0.50f)) / 0.14f);
                             float wb = std::exp(-((lambda - 0.85f) * (lambda - 0.85f)) / 0.14f);
@@ -2557,7 +2640,7 @@ void StartRendering() {
 
                             // Jeśli promień trafił prosto w kryształ szklany:
                             if (hit_room.mat && hit_room.mat->is_dielectric()) {
-                                cur_ray = Ray(hit_room.p - hit_room.normal * 0.002f, cur_ray.direction);
+                                cur_ray = Ray(hit_room.p - cur_ray.direction * 0.005f, cur_ray.direction);
                             } else {
                                 // Trafienie w podłogę pokoju lub ramę okna bezpośrednim światłem
                                 if (!hit_room.mat->is_specular() && hit_room.mat->emitted(hit_room.p).near_zero()) {
@@ -2735,7 +2818,11 @@ void StartRendering() {
                             if (algo == 3 && glass_crystal && dist01(rng) < 0.35f) {
                                 // Manifold Exploration Perturbation (Jakob & Marschner 2012, Sekcja 5.1 & Rysunek 5 i 6)
                                 Ray cur_cam_ray = cam.get_ray(cur_x.u[0], 1.0f - cur_x.u[1]);
-                                auto spec_test = TraceThroughCrystal(cur_cam_ray, glass_crystal, 1.530f);
+                                float path_ior = crystal_ior;
+                                if (crystal_dispersion > 1e-4f) {
+                                    path_ior = crystal_ior + (2.0f * cur_x.u[2] - 1.0f) * crystal_dispersion;
+                                }
+                                auto spec_test = TraceThroughCrystal(cur_cam_ray, glass_crystal, path_ior);
                                 if (spec_test.hit) {
                                     Vec3 target_n(0.0f, 1.0f, 0.0f);
                                     float d_plane = dot(spec_test.dir_exit, target_n);
@@ -2748,15 +2835,25 @@ void StartRendering() {
                                             std::normal_distribution<float> norm_dist(0.0f, 0.020f);
                                             Vec3 perturbed_target = hit_p + Vec3(norm_dist(rng), 0.0f, norm_dist(rng));
 
+                                            // Perturbacja spektralna wzdłuż rozmaitości dyspersyjnej:
+                                            float prop_wl = cur_x.u[2];
+                                            float walked_ior = path_ior;
+                                            if (crystal_dispersion > 1e-4f) {
+                                                std::normal_distribution<float> wl_dist(0.0f, 0.035f);
+                                                prop_wl = std::clamp(cur_x.u[2] + wl_dist(rng), 0.0f, 1.0f);
+                                                walked_ior = crystal_ior + (2.0f * prop_wl - 1.0f) * crystal_dispersion;
+                                            }
+
                                             Vec3 walked_dir = cur_cam_ray.direction;
                                             Vec3 final_p;
                                             // 4 iteracje metody Newtona wystarczają dzięki kwadratowej zbieżności
-                                            if (WalkSpecularManifold(cam.origin, walked_dir, glass_crystal, perturbed_target, target_n, final_p, 2e-3f, 4)) {
+                                            if (WalkSpecularManifold(cam.origin, walked_dir, glass_crystal, perturbed_target, target_n, final_p, 2e-3f, 4, walked_ior)) {
                                                 float new_s = 0.0f, new_t = 0.0f;
                                                 if (cam.project_direction(walked_dir, new_s, new_t)) {
                                                     u_prop = cur_x.u;
                                                     u_prop[0] = std::clamp(new_s, 0.0f, 0.999999f);
                                                     u_prop[1] = std::clamp(1.0f - new_t, 0.0f, 0.999999f);
+                                                    u_prop[2] = prop_wl;
                                                     did_manifold = true;
                                                 }
                                             }
@@ -3128,7 +3225,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 g_cam_yaw   += dx * 0.007f;
                 g_cam_pitch = std::clamp(g_cam_pitch + dy * 0.007f, -1.45f, 1.45f);
                 g_nav_last_mouse = {mx, my};
-                RenderFastPreview();
+                g_viewport_dirty.store(true);
                 InvalidateRect(hWnd, NULL, FALSE);
                 return 0;
             }
@@ -3141,7 +3238,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 Vec3 v = cross(w, u);
                 g_cam_target = g_cam_target - u * (dx * 0.0025f * g_cam_distance) + v * (dy * 0.0025f * g_cam_distance);
                 g_nav_last_mouse = {mx, my};
-                RenderFastPreview();
+                g_viewport_dirty.store(true);
                 InvalidateRect(hWnd, NULL, FALSE);
                 return 0;
             }
@@ -3235,6 +3332,11 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
 
         case WM_PAINT: {
+            if (g_viewport_dirty.load() && !g_is_rendering.load()) {
+                RenderFastPreview();
+                g_viewport_dirty.store(false);
+            }
+
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
@@ -3247,7 +3349,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 int destH = g_canvas_view_height;
 
                 // Centrowanie i zachowanie proporcji kadru dla aktywnego renderu Path Tracer
-                if (g_is_rendering.load() || bufW != g_canvas_view_width || bufH != g_canvas_view_height) {
+                if (g_is_rendering.load()) {
                     float canvasAspect = static_cast<float>(g_canvas_view_width) / static_cast<float>(std::max(1, g_canvas_view_height));
                     float bufAspect = static_cast<float>(bufW) / static_cast<float>(bufH);
 
@@ -3289,7 +3391,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 bmi.bmiHeader.biBitCount = 32;
                 bmi.bmiHeader.biCompression = BI_RGB;
 
-                SetStretchBltMode(hdc, HALFTONE);
+                SetStretchBltMode(hdc, COLORONCOLOR);
                 SetBrushOrgEx(hdc, 0, 0, NULL);
 
                 StretchDIBits(
