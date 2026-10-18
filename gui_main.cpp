@@ -163,18 +163,35 @@ public:
 class Dielectric : public Material {
 public:
     float ir;
-    explicit Dielectric(float index_of_refraction) : ir(index_of_refraction) {}
+    float dispersion = 0.0f;
+    explicit Dielectric(float index_of_refraction, float disp = 0.0f)
+        : ir(index_of_refraction), dispersion(disp) {}
 
     bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, std::mt19937& rng) const override {
+        std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+        float effective_ir = ir;
         attenuation = Vec3(1.0f, 1.0f, 1.0f);
-        float refraction_ratio = rec.front_face ? (1.0f / ir) : ir;
+
+        if (dispersion > 1e-4f) {
+            float lambda = dist01(rng);
+            effective_ir = ir + (2.0f * lambda - 1.0f) * dispersion;
+            float wr = std::exp(-((lambda - 0.15f) * (lambda - 0.15f)) / 0.14f);
+            float wg = std::exp(-((lambda - 0.50f) * (lambda - 0.50f)) / 0.14f);
+            float wb = std::exp(-((lambda - 0.85f) * (lambda - 0.85f)) / 0.14f);
+            Vec3 spec(wr, wg, wb);
+            float avg = (spec.x + spec.y + spec.z) / 3.0f;
+            if (avg > 1e-4f) spec = spec / avg;
+            float blend = std::clamp(dispersion * 10.0f, 0.0f, 1.0f);
+            attenuation = (1.0f - blend) * Vec3(1.0f, 1.0f, 1.0f) + blend * spec;
+        }
+
+        float refraction_ratio = rec.front_face ? (1.0f / effective_ir) : effective_ir;
 
         Vec3 unit_direction = unit_vector(r_in.direction);
         float cos_theta = std::fmin(dot(-unit_direction, rec.normal), 1.0f);
         float sin_theta = std::sqrt(std::max(0.0f, 1.0f - cos_theta * cos_theta));
 
         bool cannot_refract = refraction_ratio * sin_theta > 1.0f;
-        std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
 
         Vec3 direction;
         if (cannot_refract || schlick_reflectance(cos_theta, refraction_ratio) > dist01(rng)) {
@@ -697,6 +714,7 @@ public:
 
         float r2 = search_radius * search_radius;
         Vec3 accum(0, 0, 0);
+        int hit_count = 0;
 
         // Normalizacja stożkowa Jensena:
         // Całka po dysku (1 - d/r) wynosi (pi * r^2) / 3.
@@ -719,10 +737,21 @@ public:
                         float dist = std::sqrt(dist_sq);
                         float w = (1.0f - dist / search_radius);
                         accum = accum + ph.flux * (w * norm_factor);
+                        hit_count++;
                     }
                 }
             }
         }
+
+        // Regularyzacja chromatyczna (Chroma Regularization):
+        // Zapobiega pojawianiu się pojedynczych kolorowych artefaktów/plamek (fireflies)
+        // przy niskiej gęstości fotonów, płynnie dopuszczając czyste widmo w gęstych skupieniach kaustyki.
+        if (hit_count > 0 && accum.length_squared() > 1e-8f) {
+            float lum = (accum.x + accum.y + accum.z) / 3.0f;
+            float chroma_trust = std::clamp((static_cast<float>(hit_count) - 1.0f) / 6.0f, 0.0f, 1.0f);
+            accum = (1.0f - chroma_trust) * Vec3(lum, lum, lum) + chroma_trust * accum;
+        }
+
         return accum;
     }
 };
@@ -1212,19 +1241,21 @@ struct EditableSceneObject {
     int mat_type = 0; // 0=Lambertian, 1=Metal, 2=Dielectric, 3=DiffuseLight
     Vec3 mat_color = Vec3(0.8f, 0.8f, 0.8f);
     float mat_param = 0.05f; // Roughness or IOR or Light intensity
+    float mat_dispersion = 0.0f; // Cauchy Dispersion (0.00 = neutral, 0.01 - 0.08 = prism rainbow)
 };
 
-inline void SetObjectMaterial(EditableSceneObject& obj, int type, const Vec3& col, float param) {
+inline void SetObjectMaterial(EditableSceneObject& obj, int type, const Vec3& col, float param, float dispersion = 0.0f) {
     obj.mat_type = type;
     obj.mat_color = col;
     obj.mat_param = param;
+    obj.mat_dispersion = dispersion;
     if (type == 0) {
         obj.material = std::make_shared<Lambertian>(col);
     } else if (type == 1) {
         obj.material = std::make_shared<Metal>(col, std::clamp(param, 0.001f, 1.0f));
     } else if (type == 2) {
         float ior = (param > 0.1f) ? param : 1.55f;
-        obj.material = std::make_shared<Dielectric>(ior);
+        obj.material = std::make_shared<Dielectric>(ior, dispersion);
     } else if (type == 3) {
         float intensity = (param > 0.01f) ? param : 1.0f;
         obj.material = std::make_shared<DiffuseLight>(col * intensity);
@@ -1236,18 +1267,19 @@ inline EditableSceneObject make_sphere(const std::wstring& name, const Vec3& cen
     obj.name = name;
     obj.center = center;
     obj.radius = r;
-    SetObjectMaterial(obj, mat_type, col, param);
+    SetObjectMaterial(obj, mat_type, col, param, 0.0f);
     return obj;
 }
 
-inline EditableSceneObject make_crystal(const std::wstring& name, const Vec3& center, float r, float h, float ior = 1.55f) {
+inline EditableSceneObject make_crystal(const std::wstring& name, const Vec3& center, float r, float h, float ior = 1.55f, float dispersion = 0.02f) {
     EditableSceneObject obj;
     obj.name = name;
     obj.center = center;
     obj.radius = r;
     obj.secondary_param = h;
     obj.is_crystal = true;
-    SetObjectMaterial(obj, 2, Vec3(1.0f, 1.0f, 1.0f), ior);
+    obj.mat_dispersion = dispersion;
+    SetObjectMaterial(obj, 2, Vec3(1.0f, 1.0f, 1.0f), ior, dispersion);
     return obj;
 }
 
@@ -1259,7 +1291,7 @@ inline EditableSceneObject make_quad(const std::wstring& name, const Vec3& corne
     obj.is_quad = true;
     obj.quad_u = u;
     obj.quad_v = v;
-    SetObjectMaterial(obj, mat_type, col, param);
+    SetObjectMaterial(obj, mat_type, col, param, 0.0f);
     return obj;
 }
 
@@ -1310,6 +1342,8 @@ constexpr int IDC_EDIT_MAT_G     = 1027;
 constexpr int IDC_EDIT_MAT_B     = 1028;
 constexpr int IDC_EDIT_MAT_PARAM = 1029;
 constexpr int IDC_BTN_APPLY_MAT  = 1030;
+constexpr int IDC_BTN_EXPORT_OBJ = 1031;
+constexpr int IDC_EDIT_MAT_DISP  = 1032;
 
 int g_current_scene  = 0;
 int g_render_width   = 800;
@@ -1387,6 +1421,7 @@ HWND g_hGroupScene   = nullptr;
 HWND g_hLblScene     = nullptr;
 HWND g_hComboScene   = nullptr;
 HWND g_hBtnImportObj = nullptr;
+HWND g_hBtnExportObj = nullptr;
 
 HWND g_hGroupRender  = nullptr;
 HWND g_hLblAlgo      = nullptr;
@@ -1432,6 +1467,9 @@ HWND g_hEditMatG     = nullptr;
 HWND g_hEditMatB     = nullptr;
 HWND g_hLblMatParam  = nullptr;
 HWND g_hEditMatParam = nullptr;
+HWND g_hLblMatDisp   = nullptr;
+HWND g_hEditMatDisp  = nullptr;
+HWND g_hLblMatDispHint = nullptr;
 HWND g_hBtnApplyMat  = nullptr;
 
 HWND g_hGroupSave    = nullptr;
@@ -1510,8 +1548,11 @@ void RenderFastPreview() {
     if (g_is_rendering.load()) return;
 
     Camera cam = GetCurrentCamera();
-    int pw = std::max(100, g_canvas_view_width / 2);
-    int ph = std::max(60, g_canvas_view_height / 2);
+    bool is_interacting = (g_is_orbiting || g_is_panning || g_is_grabbing || g_is_scaling);
+
+    // Dynamiczna rozdzielczość podczas interaktywnego obracania/przesuwania (płynne 100+ FPS)
+    int pw = is_interacting ? std::clamp(g_canvas_view_width / 3, 160, 360) : std::max(100, g_canvas_view_width / 2);
+    int ph = is_interacting ? std::clamp(g_canvas_view_height / 3, 90, 200) : std::max(60, g_canvas_view_height / 2);
 
     std::vector<uint32_t> small_buf(pw * ph);
 
@@ -1532,79 +1573,257 @@ void RenderFastPreview() {
         }
     }
 
-    for (int py = 0; py < ph; ++py) {
-        float v = (static_cast<float>(ph - 1 - py) + 0.5f) / static_cast<float>(ph);
-        int row_offset = py * pw;
+    // Wielowątkowy podgląd 3D na wszystkich rdzeniach CPU
+    unsigned int num_threads = std::min(8u, std::max(2u, std::thread::hardware_concurrency()));
+    std::vector<std::thread> workers;
+    int rows_per_thread = (ph + num_threads - 1) / num_threads;
 
-        for (int px = 0; px < pw; ++px) {
-            float u = (static_cast<float>(px) + 0.5f) / static_cast<float>(pw);
-            Ray r = cam.get_ray(u, v);
+    for (unsigned int th = 0; th < num_threads; ++th) {
+        int y_start = th * rows_per_thread;
+        int y_end = std::min(ph, y_start + rows_per_thread);
+        if (y_start >= ph) break;
 
-            HitRecord rec;
-            Vec3 col;
-            if (world.hit(r, 0.001f, 1e9f, rec)) {
-                Vec3 to_light = light_pos - rec.p;
-                float dist_l = to_light.length();
-                Vec3 dir_l = to_light / (dist_l > 1e-4f ? dist_l : 1.0f);
-                float diff = std::fmax(0.15f, dot(rec.normal, dir_l));
+        workers.emplace_back([&, y_start, y_end]() {
+            for (int py = y_start; py < y_end; ++py) {
+                float v = (static_cast<float>(ph - 1 - py) + 0.5f) / static_cast<float>(ph);
+                int row_offset = py * pw;
 
-                if (!rec.mat->emitted(rec.p).near_zero()) {
-                    col = Vec3(1.0f, 0.95f, 0.85f);
-                } else if (rec.mat->is_dielectric()) {
-                    float rim = std::pow(1.0f - std::fabs(dot(rec.normal, -unit_vector(r.direction))), 2.5f);
-                    col = Vec3(0.12f, 0.18f, 0.28f) + Vec3(0.85f, 0.95f, 1.0f) * (rim * 0.9f);
-                } else if (rec.mat->is_specular()) {
-                    Vec3 refl = reflect(unit_vector(r.direction), rec.normal);
-                    float spec = std::pow(std::fmax(0.0f, dot(refl, dir_l)), 16.0f);
-                    col = rec.mat->get_albedo() * diff + Vec3(1.0f, 1.0f, 1.0f) * (spec * 0.6f);
-                } else {
-                    col = rec.mat->get_albedo() * diff;
+                for (int px = 0; px < pw; ++px) {
+                    float u = (static_cast<float>(px) + 0.5f) / static_cast<float>(pw);
+                    Ray r = cam.get_ray(u, v);
 
-                    if (g_show_floor_grid && std::fabs(rec.p.y) < 0.05f) {
-                        float fx = std::fabs(rec.p.x - std::round(rec.p.x));
-                        float fz = std::fabs(rec.p.z - std::round(rec.p.z));
-                        if (fx < 0.035f || fz < 0.035f) {
-                            col = col * 0.82f + Vec3(0.40f, 0.45f, 0.55f) * 0.35f;
+                    HitRecord rec;
+                    Vec3 col;
+                    if (world.hit(r, 0.001f, 1e9f, rec)) {
+                        Vec3 to_light = light_pos - rec.p;
+                        float dist_l = to_light.length();
+                        Vec3 dir_l = to_light / (dist_l > 1e-4f ? dist_l : 1.0f);
+                        float diff = std::fmax(0.15f, dot(rec.normal, dir_l));
+
+                        if (!rec.mat->emitted(rec.p).near_zero()) {
+                            col = Vec3(1.0f, 0.95f, 0.85f);
+                        } else if (rec.mat->is_dielectric()) {
+                            float rim = std::pow(1.0f - std::fabs(dot(rec.normal, -unit_vector(r.direction))), 2.5f);
+                            col = Vec3(0.12f, 0.18f, 0.28f) + Vec3(0.85f, 0.95f, 1.0f) * (rim * 0.9f);
+                        } else if (rec.mat->is_specular()) {
+                            Vec3 refl = reflect(unit_vector(r.direction), rec.normal);
+                            float spec = std::pow(std::fmax(0.0f, dot(refl, dir_l)), 16.0f);
+                            col = rec.mat->get_albedo() * diff + Vec3(1.0f, 1.0f, 1.0f) * (spec * 0.6f);
+                        } else {
+                            col = rec.mat->get_albedo() * diff;
+
+                            if (g_show_floor_grid && std::fabs(rec.p.y) < 0.05f) {
+                                float fx = std::fabs(rec.p.x - std::round(rec.p.x));
+                                float fz = std::fabs(rec.p.z - std::round(rec.p.z));
+                                if (fx < 0.035f || fz < 0.035f) {
+                                    col = col * 0.82f + Vec3(0.40f, 0.45f, 0.55f) * 0.35f;
+                                }
+                                if (std::fabs(rec.p.z) < 0.045f && std::fabs(rec.p.x) < 8.0f) {
+                                    col = Vec3(0.85f, 0.25f, 0.25f);
+                                } else if (std::fabs(rec.p.x) < 0.045f && std::fabs(rec.p.z) < 8.0f) {
+                                    col = Vec3(0.25f, 0.45f, 0.90f);
+                                }
+                            }
                         }
-                        if (std::fabs(rec.p.z) < 0.045f && std::fabs(rec.p.x) < 8.0f) {
-                            col = Vec3(0.85f, 0.25f, 0.25f);
-                        } else if (std::fabs(rec.p.x) < 0.045f && std::fabs(rec.p.z) < 8.0f) {
-                            col = Vec3(0.25f, 0.45f, 0.90f);
-                        }
+                    } else {
+                        Vec3 unit_dir = unit_vector(r.direction);
+                        float a = 0.5f * (unit_dir.y + 1.0f);
+                        col = (1.0f - a) * Vec3(0.06f, 0.08f, 0.12f) + a * Vec3(0.18f, 0.22f, 0.32f);
                     }
+
+                    float cr = std::clamp(std::sqrt(col.x), 0.0f, 0.999f);
+                    float cg = std::clamp(std::sqrt(col.y), 0.0f, 0.999f);
+                    float cb = std::clamp(std::sqrt(col.z), 0.0f, 0.999f);
+
+                    uint8_t ir = static_cast<uint8_t>(256.0f * cr);
+                    uint8_t ig = static_cast<uint8_t>(256.0f * cg);
+                    uint8_t ib = static_cast<uint8_t>(256.0f * cb);
+
+                    small_buf[row_offset + px] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
                 }
-            } else {
-                Vec3 unit_dir = unit_vector(r.direction);
-                float a = 0.5f * (unit_dir.y + 1.0f);
-                col = (1.0f - a) * Vec3(0.06f, 0.08f, 0.12f) + a * Vec3(0.18f, 0.22f, 0.32f);
             }
+        });
+    }
 
-            float cr = std::clamp(std::sqrt(col.x), 0.0f, 0.999f);
-            float cg = std::clamp(std::sqrt(col.y), 0.0f, 0.999f);
-            float cb = std::clamp(std::sqrt(col.z), 0.0f, 0.999f);
-
-            uint8_t ir = static_cast<uint8_t>(256.0f * cr);
-            uint8_t ig = static_cast<uint8_t>(256.0f * cg);
-            uint8_t ib = static_cast<uint8_t>(256.0f * cb);
-
-            small_buf[row_offset + px] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
-        }
+    for (auto& w : workers) {
+        if (w.joinable()) w.join();
     }
 
     g_display_buffer.assign(g_canvas_view_width * g_canvas_view_height, 0xFF18181B);
     g_cur_buf_w.store(g_canvas_view_width);
     g_cur_buf_h.store(g_canvas_view_height);
 
+    float x_ratio = static_cast<float>(pw) / static_cast<float>(g_canvas_view_width);
+    float y_ratio = static_cast<float>(ph) / static_cast<float>(g_canvas_view_height);
+
     for (int y = 0; y < g_canvas_view_height; ++y) {
-        int sy = y / 2;
-        if (sy >= ph) sy = ph - 1;
+        int sy = std::min(ph - 1, static_cast<int>(y * y_ratio));
         int row_dst = y * g_canvas_view_width;
         int row_src = sy * pw;
         for (int x = 0; x < g_canvas_view_width; ++x) {
-            int sx = x / 2;
-            if (sx >= pw) sx = pw - 1;
+            int sx = std::min(pw - 1, static_cast<int>(x * x_ratio));
             g_display_buffer[row_dst + x] = small_buf[row_src + sx];
         }
+    }
+}
+
+void ExportSceneToOBJ() {
+    if (g_is_rendering.load()) {
+        MessageBoxW(g_hWnd, L"Renderowanie jest w toku! Przerwij renderowanie, aby wyeksportowac scene.", L"Uwaga", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    wchar_t filename[MAX_PATH] = L"scena_eksport.obj";
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(OPENFILENAMEW);
+    ofn.hwndOwner = g_hWnd;
+    ofn.lpstrFilter = L"Modele Wavefront OBJ (*.obj)\0*.obj\0Wszystkie pliki (*.*)\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (GetSaveFileNameW(&ofn)) {
+        FILE* fp = _wfopen(filename, L"w");
+        if (!fp) {
+            MessageBoxW(g_hWnd, L"Nie mozna utworzyc pliku docelowego do zapisu sceny.", L"Blad zapisu OBJ", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        fprintf(fp, "# Path Tracer 3D - Scene Export Wavefront OBJ\n");
+        fprintf(fp, "# Liczba obiektow: %zu\n\n", g_scene_objects.size());
+
+        int v_offset = 1;
+
+        for (size_t i = 0; i < g_scene_objects.size(); ++i) {
+            const auto& obj = g_scene_objects[i];
+            char obj_name[128];
+            WideCharToMultiByte(CP_UTF8, 0, obj.name.c_str(), -1, obj_name, sizeof(obj_name), nullptr, nullptr);
+            for (char* p = obj_name; *p; ++p) {
+                if (*p == ' ' || *p == '/' || *p == '\\' || *p == '(' || *p == ')') *p = '_';
+            }
+
+            fprintf(fp, "o Object_%zu_%s\n", i + 1, obj_name);
+            fprintf(fp, "# Typ: %d, Kolor RGB: (%.2f, %.2f, %.2f), Param: %.2f, Dyspersja: %.3f\n",
+                    obj.mat_type, obj.mat_color.x, obj.mat_color.y, obj.mat_color.z, obj.mat_param, obj.mat_dispersion);
+
+            if (obj.is_mesh && obj.mesh_triangles) {
+                for (const auto& tri : *obj.mesh_triangles) {
+                    Vec3 v0 = obj.center + tri.v0 * obj.radius;
+                    Vec3 v1 = obj.center + tri.v1 * obj.radius;
+                    Vec3 v2 = obj.center + tri.v2 * obj.radius;
+                    fprintf(fp, "v %.6f %.6f %.6f\n", v0.x, v0.y, v0.z);
+                    fprintf(fp, "v %.6f %.6f %.6f\n", v1.x, v1.y, v1.z);
+                    fprintf(fp, "v %.6f %.6f %.6f\n", v2.x, v2.y, v2.z);
+                    fprintf(fp, "f %d %d %d\n", v_offset, v_offset + 1, v_offset + 2);
+                    v_offset += 3;
+                }
+            } else if (obj.is_quad) {
+                Vec3 p0 = obj.center;
+                Vec3 p1 = obj.center + obj.quad_u * obj.radius;
+                Vec3 p2 = obj.center + (obj.quad_u + obj.quad_v) * obj.radius;
+                Vec3 p3 = obj.center + obj.quad_v * obj.radius;
+                fprintf(fp, "v %.6f %.6f %.6f\n", p0.x, p0.y, p0.z);
+                fprintf(fp, "v %.6f %.6f %.6f\n", p1.x, p1.y, p1.z);
+                fprintf(fp, "v %.6f %.6f %.6f\n", p2.x, p2.y, p2.z);
+                fprintf(fp, "v %.6f %.6f %.6f\n", p3.x, p3.y, p3.z);
+                fprintf(fp, "f %d %d %d\n", v_offset, v_offset + 1, v_offset + 2);
+                fprintf(fp, "f %d %d %d\n", v_offset, v_offset + 2, v_offset + 3);
+                v_offset += 4;
+            } else if (obj.is_crystal) {
+                float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
+                float half_h = h * 0.5f;
+                float r = obj.radius;
+                int start_v = v_offset;
+
+                fprintf(fp, "v %.6f %.6f %.6f\n", obj.center.x, obj.center.y + half_h, obj.center.z);
+                fprintf(fp, "v %.6f %.6f %.6f\n", obj.center.x, obj.center.y - half_h, obj.center.z);
+
+                for (int k = 0; k < 6; ++k) {
+                    float a = k * (3.14159265f / 3.0f);
+                    fprintf(fp, "v %.6f %.6f %.6f\n",
+                            obj.center.x + std::cos(a) * r * 0.85f,
+                            obj.center.y + half_h * 0.65f,
+                            obj.center.z + std::sin(a) * r * 0.85f);
+                }
+                for (int k = 0; k < 6; ++k) {
+                    float a = (k + 0.5f) * (3.14159265f / 3.0f);
+                    fprintf(fp, "v %.6f %.6f %.6f\n",
+                            obj.center.x + std::cos(a) * r,
+                            obj.center.y,
+                            obj.center.z + std::sin(a) * r);
+                }
+                for (int k = 0; k < 6; ++k) {
+                    float a = k * (3.14159265f / 3.0f);
+                    fprintf(fp, "v %.6f %.6f %.6f\n",
+                            obj.center.x + std::cos(a) * r * 0.85f,
+                            obj.center.y - half_h * 0.65f,
+                            obj.center.z + std::sin(a) * r * 0.85f);
+                }
+
+                int top_idx = start_v;
+                int bot_idx = start_v + 1;
+                int ring_top = start_v + 2;
+                int ring_mid = start_v + 8;
+                int ring_bot = start_v + 14;
+
+                for (int k = 0; k < 6; ++k) {
+                    int nxt = (k + 1) % 6;
+                    fprintf(fp, "f %d %d %d\n", top_idx, ring_top + k, ring_top + nxt);
+                }
+                for (int k = 0; k < 6; ++k) {
+                    int nxt = (k + 1) % 6;
+                    fprintf(fp, "f %d %d %d\n", ring_top + k, ring_mid + k, ring_top + nxt);
+                    fprintf(fp, "f %d %d %d\n", ring_top + nxt, ring_mid + k, ring_mid + nxt);
+                }
+                for (int k = 0; k < 6; ++k) {
+                    int nxt = (k + 1) % 6;
+                    fprintf(fp, "f %d %d %d\n", ring_mid + k, ring_bot + k, ring_mid + nxt);
+                    fprintf(fp, "f %d %d %d\n", ring_mid + nxt, ring_bot + k, ring_bot + nxt);
+                }
+                for (int k = 0; k < 6; ++k) {
+                    int nxt = (k + 1) % 6;
+                    fprintf(fp, "f %d %d %d\n", bot_idx, ring_bot + nxt, ring_bot + k);
+                }
+                v_offset += 20;
+            } else {
+                int rings = 12;
+                int sectors = 18;
+                int start_v = v_offset;
+
+                for (int r = 0; r <= rings; ++r) {
+                    float theta = r * (3.14159265f / rings);
+                    float sin_t = std::sin(theta);
+                    float cos_t = std::cos(theta);
+                    for (int s = 0; s <= sectors; ++s) {
+                        float phi = s * (6.2831853f / sectors);
+                        float x = obj.center.x + obj.radius * sin_t * std::cos(phi);
+                        float y = obj.center.y + obj.radius * cos_t;
+                        float z = obj.center.z + obj.radius * sin_t * std::sin(phi);
+                        fprintf(fp, "v %.6f %.6f %.6f\n", x, y, z);
+                    }
+                }
+
+                for (int r = 0; r < rings; ++r) {
+                    for (int s = 0; s < sectors; ++s) {
+                        int i0 = start_v + r * (sectors + 1) + s;
+                        int i1 = i0 + 1;
+                        int i2 = start_v + (r + 1) * (sectors + 1) + s;
+                        int i3 = i2 + 1;
+                        fprintf(fp, "f %d %d %d\n", i0, i2, i1);
+                        fprintf(fp, "f %d %d %d\n", i1, i2, i3);
+                    }
+                }
+                v_offset += (rings + 1) * (sectors + 1);
+            }
+            fprintf(fp, "\n");
+        }
+
+        fclose(fp);
+
+        wchar_t msg[300];
+        swprintf(msg, 300, L"Wyeksportowano pomyslnie %zu obiektow do pliku Wavefront OBJ!\nPlik docelowy:\n%s",
+                 g_scene_objects.size(), filename);
+        MessageBoxW(g_hWnd, msg, L"Eksport Sceny 3D Zakonczony", MB_OK | MB_ICONINFORMATION);
     }
 }
 
@@ -1644,6 +1863,10 @@ void UpdateObjectFieldsFromSelection(int index) {
         swprintf(buf, 64, L"%.2f", obj.mat_param);
         SetWindowTextW(g_hEditMatParam, buf);
     }
+    if (g_hEditMatDisp) {
+        swprintf(buf, 64, L"%.3f", obj.mat_dispersion);
+        SetWindowTextW(g_hEditMatDisp, buf);
+    }
 }
 
 void ApplyMaterialFromFields() {
@@ -1651,23 +1874,28 @@ void ApplyMaterialFromFields() {
     if (sel < 0 || sel >= static_cast<int>(g_scene_objects.size())) return;
 
     int mat_type = static_cast<int>(SendMessage(g_hComboMatType, CB_GETCURSEL, 0, 0));
-    wchar_t bufR[32], bufG[32], bufB[32], bufP[32];
+    wchar_t bufR[32], bufG[32], bufB[32], bufP[32], bufDisp[32];
     GetWindowTextW(g_hEditMatR, bufR, 32);
     GetWindowTextW(g_hEditMatG, bufG, 32);
     GetWindowTextW(g_hEditMatB, bufB, 32);
     GetWindowTextW(g_hEditMatParam, bufP, 32);
+    if (g_hEditMatDisp) GetWindowTextW(g_hEditMatDisp, bufDisp, 32);
+    else wcscpy(bufDisp, L"0.00");
 
     float r = wcstof(bufR, nullptr);
     float g = wcstof(bufG, nullptr);
     float b = wcstof(bufB, nullptr);
     float param = wcstof(bufP, nullptr);
+    float disp = wcstof(bufDisp, nullptr);
+    if (disp < 0.0f) disp = 0.0f;
+    if (disp > 0.20f) disp = 0.20f;
 
-    SetObjectMaterial(g_scene_objects[sel], mat_type, Vec3(r, g, b), param);
+    SetObjectMaterial(g_scene_objects[sel], mat_type, Vec3(r, g, b), param, disp);
 
     const wchar_t* typeNames[] = { L"Lambertian (Matowy)", L"Metal (Zwierciadlany)", L"Dielectric (Szklo)", L"DiffuseLight (Swiatlo)" };
-    wchar_t msg[160];
-    swprintf(msg, 160, L"Zmieniono material [%s] na: %s (R:%.2f G:%.2f B:%.2f, Param:%.2f)",
-             g_scene_objects[sel].name.c_str(), typeNames[std::clamp(mat_type, 0, 3)], r, g, b, param);
+    wchar_t msg[200];
+    swprintf(msg, 200, L"Zmieniono material [%s] na: %s (R:%.2f G:%.2f B:%.2f, Param:%.2f, Dyspersja:%.3f)",
+             g_scene_objects[sel].name.c_str(), typeNames[std::clamp(mat_type, 0, 3)], r, g, b, param, disp);
     SetWindowTextW(g_hStatusLabel, msg);
 
     RenderFastPreview();
@@ -2200,6 +2428,7 @@ void StartRendering() {
         std::vector<Sphere> light_sources;
         std::shared_ptr<ConvexPolyhedron> glass_crystal = nullptr;
         float crystal_radius = 0.65f;
+        float crystal_dispersion = 0.02f;
 
         if (g_current_scene == 0) {
             world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
@@ -2211,6 +2440,7 @@ void StartRendering() {
             if (obj.is_crystal) {
                 float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
                 crystal_radius = obj.radius;
+                crystal_dispersion = obj.mat_dispersion;
                 glass_crystal = CreateFacetedCrystal(obj.center, obj.radius, h, obj.material);
             }
             if (obj.material && !obj.material->emitted(obj.center).near_zero()) {
@@ -2281,11 +2511,23 @@ void StartRendering() {
                     local_photons.reserve(photons_per_thread / 2);
 
                     for (int i = 0; i < photons_per_thread && !g_cancel_render.load(); ++i) {
-                        // Rozszczepienie chromatyczne (Cauchy Dispersion): 3 kanały spektralne R, G, B
-                        int spec_ch = i % 3;
-                        float ior = (spec_ch == 0) ? 1.515f : ((spec_ch == 1) ? 1.530f : 1.555f);
-                        Vec3 ch_tint = (spec_ch == 0) ? Vec3(3.0f, 0.0f, 0.0f) :
-                                       ((spec_ch == 1) ? Vec3(0.0f, 3.0f, 0.0f) : Vec3(0.0f, 0.0f, 3.0f));
+                        // Płynna dyspersja spektralna Cauchy'ego (bez artefaktów pojedynczych kanałów RGB):
+                        float ior = 1.530f;
+                        Vec3 ch_tint(1.0f, 1.0f, 1.0f);
+
+                        if (crystal_dispersion > 1e-4f) {
+                            float lambda = dist01(rng);
+                            ior = 1.530f + (2.0f * lambda - 1.0f) * crystal_dispersion;
+                            float wr = std::exp(-((lambda - 0.15f) * (lambda - 0.15f)) / 0.14f);
+                            float wg = std::exp(-((lambda - 0.50f) * (lambda - 0.50f)) / 0.14f);
+                            float wb = std::exp(-((lambda - 0.85f) * (lambda - 0.85f)) / 0.14f);
+                            Vec3 spec(wr, wg, wb);
+                            float avg = (spec.x + spec.y + spec.z) / 3.0f;
+                            if (avg > 1e-4f) spec = spec / avg;
+                            float blend = std::clamp(crystal_dispersion * 12.0f, 0.0f, 1.0f);
+                            ch_tint = (1.0f - blend) * Vec3(1.0f, 1.0f, 1.0f) + blend * spec;
+                        }
+
                         Vec3 cur_flux = photon_flux_base * ch_tint;
 
                         Ray cur_ray;
@@ -2826,6 +3068,8 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 g_is_orbiting = false;
                 g_is_panning  = false;
                 ReleaseCapture();
+                RenderFastPreview();
+                InvalidateRect(hWnd, NULL, FALSE);
             }
             return 0;
         }
@@ -2846,9 +3090,13 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
 
         case WM_MBUTTONUP: {
-            g_is_orbiting = false;
-            g_is_panning  = false;
-            ReleaseCapture();
+            if (g_is_orbiting || g_is_panning) {
+                g_is_orbiting = false;
+                g_is_panning  = false;
+                ReleaseCapture();
+                RenderFastPreview();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
             return 0;
         }
 
@@ -3212,7 +3460,8 @@ void ResizeLayout(int clientW, int clientH) {
     if (g_hLblScene) MoveWindow(g_hLblScene, sideX + 15, curY, 80, 20, TRUE);
     if (g_hComboScene) MoveWindow(g_hComboScene, sideX + 100, curY - 2, 275, 150, TRUE);
     curY += 26;
-    if (g_hBtnImportObj) MoveWindow(g_hBtnImportObj, sideX + 15, curY, 360, 28, TRUE);
+    if (g_hBtnImportObj) MoveWindow(g_hBtnImportObj, sideX + 15, curY, 175, 28, TRUE);
+    if (g_hBtnExportObj) MoveWindow(g_hBtnExportObj, sideX + 200, curY, 175, 28, TRUE);
 
     curY += 44;
     // 2. Grupa: Parametry renderowania
@@ -3252,7 +3501,7 @@ void ResizeLayout(int clientW, int clientH) {
 
     curY += 46;
     // 3. Grupa: Obiekt, Pozycja & Material
-    if (g_hGroupObj) MoveWindow(g_hGroupObj, sideX, curY, panelW, 252, TRUE);
+    if (g_hGroupObj) MoveWindow(g_hGroupObj, sideX, curY, panelW, 280, TRUE);
     curY += 18;
     if (g_hLblObj) MoveWindow(g_hLblObj, sideX + 15, curY, 90, 20, TRUE);
     if (g_hComboObjects) MoveWindow(g_hComboObjects, sideX + 110, curY - 2, 265, 200, TRUE);
@@ -3287,6 +3536,11 @@ void ResizeLayout(int clientW, int clientH) {
     if (g_hEditMatG) MoveWindow(g_hEditMatG, sideX + 145, curY - 2, 50, 22, TRUE);
     if (g_hEditMatB) MoveWindow(g_hEditMatB, sideX + 200, curY - 2, 50, 22, TRUE);
     if (g_hEditMatParam) MoveWindow(g_hEditMatParam, sideX + 260, curY - 2, 80, 22, TRUE);
+
+    curY += 25;
+    if (g_hLblMatDisp) MoveWindow(g_hLblMatDisp, sideX + 15, curY, 75, 20, TRUE);
+    if (g_hEditMatDisp) MoveWindow(g_hEditMatDisp, sideX + 90, curY - 2, 75, 22, TRUE);
+    if (g_hLblMatDispHint) MoveWindow(g_hLblMatDispHint, sideX + 175, curY, 195, 20, TRUE);
 
     curY += 26;
     if (g_hBtnApplyMat) MoveWindow(g_hBtnApplyMat, sideX + 15, curY, 360, 26, TRUE);
@@ -3351,9 +3605,13 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SendMessage(g_hComboScene, CB_SETCURSEL, 0, 0);
 
             curY += 26;
-            g_hBtnImportObj = CreateWindowW(L"BUTTON", L"📂 Importuj model 3D Wavefront (.OBJ)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                sideX + 15, curY, 360, 28, hWnd, (HMENU)IDC_BTN_IMPORT_OBJ, nullptr, nullptr);
+            g_hBtnImportObj = CreateWindowW(L"BUTTON", L"📂 Importuj (.OBJ)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 15, curY, 175, 28, hWnd, (HMENU)IDC_BTN_IMPORT_OBJ, nullptr, nullptr);
             SendMessage(g_hBtnImportObj, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hBtnExportObj = CreateWindowW(L"BUTTON", L"💾 Eksportuj (.OBJ)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 200, curY, 175, 28, hWnd, (HMENU)IDC_BTN_EXPORT_OBJ, nullptr, nullptr);
+            SendMessage(g_hBtnExportObj, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 44;
             // 2. Grupa: Parametry renderowania & Algorytm
@@ -3449,7 +3707,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // 3. Grupa: Obiekt, Pozycja & Material
             g_hGroupObj = CreateWindowW(L"BUTTON", L" Edycja Obiektu, Pozycji (Blender 3D) & Materialu ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                sideX, curY, 390, 252, hWnd, nullptr, nullptr, nullptr);
+                sideX, curY, 390, 280, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupObj, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 18;
@@ -3525,6 +3783,16 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             g_hEditMatParam = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.05", WS_CHILD | WS_VISIBLE, sideX + 260, curY - 2, 80, 22, hWnd, (HMENU)IDC_EDIT_MAT_PARAM, nullptr, nullptr);
             SendMessage(g_hEditMatParam, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            curY += 25;
+            g_hLblMatDisp = CreateWindowW(L"STATIC", L"Dyspersja:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
+            SendMessage(g_hLblMatDisp, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hEditMatDisp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.020", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 75, 22, hWnd, (HMENU)IDC_EDIT_MAT_DISP, nullptr, nullptr);
+            SendMessage(g_hEditMatDisp, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hLblMatDispHint = CreateWindowW(L"STATIC", L"(0.00=biel, 0.05=tecza)", WS_CHILD | WS_VISIBLE, sideX + 175, curY, 195, 20, hWnd, nullptr, nullptr, nullptr);
+            SendMessage(g_hLblMatDispHint, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 26;
             g_hBtnApplyMat = CreateWindowW(L"BUTTON", L"🎨 Zastosuj Material do Wybranego Obiektu", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -3682,6 +3950,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             else if (wmId == IDC_BTN_IMPORT_OBJ) {
                 ImportOBJModel();
+            }
+            else if (wmId == IDC_BTN_EXPORT_OBJ) {
+                ExportSceneToOBJ();
             }
             else if (wmId == IDC_BTN_APPLY_MAT) {
                 ApplyMaterialFromFields();

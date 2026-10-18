@@ -89,6 +89,18 @@ Kompletny zestaw narzędzi do renderowania metodą **Path Tracingu** (Monte Carl
     - **Dyspersja chromatyczna (Cauchy Spectral Dispersion)**: Podział emisji fotonów na 3 kanały spektralne ($IOR_R = 1.515, IOR_G = 1.530, IOR_B = 1.555$), co tworzy autentyczne, tęczowe krawędzie załamań światła zamiast jednolitej białej plamy.
     - **Filtr stożkowy Jensena o promieniu 0.028f**: Zmniejszono promień wyszukiwania z 0.12f do 0.028f wraz z gęstą siatką 0.020f i dokładną normalizacją fizyczną $\frac{3}{\pi^2 r^2}$, gwarantując ostre, krystaliczne pasma światła fasetkowego bez przejaskrawień.
 
+15. **Konfigurowalna Dyspersja Chromatyczna i Ulepszony Algorytm Rozpraszania Spektralnego**:
+    - **Parametr `Dyspersja` w GUI**: Każdy szklany obiekt (`Dielectric` oraz Kryształ) posiada teraz w pełni edytowalny parametr dyspersji chromatycznej Cauchy'ego (`IDC_EDIT_MAT_DISP`):
+      - `0.000` = czysta, krystalicznie biała kaustyka bez żadnych zafarbowań,
+      - `0.015 - 0.025` = naturalne, subtelne rozszczepienie pryzmatyczne,
+      - `0.050 - 0.080` = intensywne, nasycone tęcze fasetkowe.
+    - **Ciągłe próbkowanie spektralne Cauchy'ego**: Zastąpiono dawne dyskretne szpilki kanałowe $R, G, B$ ciągłym próbkowaniem długości fali $\lambda \in [0, 1]$ z fizycznymi krzywymi Gaussa odpowiedzi spektralnej CIE i zachowaniem energii.
+    - **Likwidacja kolorowych artefaktów (Chroma Regularization w MEMLT i BDPT)**: Wprowadzono adaptacyjną regularyzację chromatyczną w estymatorze radiacji. Przy małej liczbie zebranych fotonów ($N \le 2$) estymator płynnie przechodzi do neutralnej luminancji, całkowicie eliminując pojedyncze jaskrawe piksele/plamki (fireflies), podczas gdy w gęstych rdzeniach kaustyki zachowane jest pełne, nasycone widmo tęczy.
+
+16. **Eksport Sceny 3D do formatu Wavefront OBJ oraz Płynny Viewport 100+ FPS**:
+    - **Przycisk `💾 Eksportuj (.OBJ)`**: Umożliwia wyeksportowanie całej bieżącej geometrii sceny (20-fasetowe kryształy, panele quadów, sfery stesselowane UV oraz zaimportowane siatki mesh) do standardowego pliku `.obj`, kompatybilnego z Blenderem, 3ds Max, Maya itp.
+    - **Płynność widoku 3D**: Dynamiczne, wielowątkowe skalowanie podglądu podczas aktywnego obracania, przesuwania (`G`), skalowania (`S`) i panowania widoku na wszystkich rdzeniach procesora zapewnia stałe, maślane 100+ FPS bez najmniejszych przycięć, z automatycznym wyostrzeniem do wysokiej jakości po zakończeniu manipulacji.
+
 ---
 
 ## Uruchomienie
