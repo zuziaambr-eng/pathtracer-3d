@@ -24,6 +24,9 @@
 #include "stb_image_write.h"
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
+#include <commdlg.h>
+
 
 // ============================================================================
 // 1. MATEMATYKA PATH TRACINGU (Vec3, Ray, HitRecord, Material)
@@ -336,6 +339,217 @@ std::shared_ptr<ConvexPolyhedron> CreateFacetedCrystal(const Vec3& center, float
     }
 
     return crystal;
+}
+
+class Quad : public Hittable {
+public:
+    Vec3 q;
+    Vec3 u;
+    Vec3 v;
+    Vec3 normal;
+    float d;
+    Vec3 w;
+    std::shared_ptr<Material> mat;
+
+    Quad(const Vec3& corner, const Vec3& u_, const Vec3& v_, std::shared_ptr<Material> m)
+        : q(corner), u(u_), v(v_), mat(std::move(m)) {
+        Vec3 n = cross(u, v);
+        normal = unit_vector(n);
+        d = dot(normal, q);
+        float len_sq = dot(n, n);
+        w = len_sq > 1e-8f ? (n / len_sq) : Vec3(0, 0, 0);
+    }
+
+    bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override {
+        float denom = dot(normal, r.direction);
+        if (std::fabs(denom) < 1e-8f) return false;
+
+        float t = (d - dot(normal, r.origin)) / denom;
+        if (t < t_min || t > t_max) return false;
+
+        Vec3 intersection = r.at(t);
+        Vec3 planar_hit = intersection - q;
+        float alpha = dot(w, cross(planar_hit, v));
+        float beta  = dot(w, cross(u, planar_hit));
+
+        if (alpha < 0.0f || alpha > 1.0f || beta < 0.0f || beta > 1.0f) {
+            return false;
+        }
+
+        rec.t = t;
+        rec.p = intersection;
+        rec.mat = mat;
+        rec.set_face_normal(r, normal);
+        return true;
+    }
+};
+
+struct Triangle {
+    Vec3 v0, v1, v2;
+    Vec3 normal;
+};
+
+inline bool hit_aabb(const Ray& r, float t_min, float t_max, const Vec3& b_min, const Vec3& b_max) {
+    for (int a = 0; a < 3; ++a) {
+        float r_dir  = (a == 0) ? r.direction.x : ((a == 1) ? r.direction.y : r.direction.z);
+        float r_orig = (a == 0) ? r.origin.x    : ((a == 1) ? r.origin.y    : r.origin.z);
+        float min_v  = (a == 0) ? b_min.x       : ((a == 1) ? b_min.y       : b_min.z);
+        float max_v  = (a == 0) ? b_max.x       : ((a == 1) ? b_max.y       : b_max.z);
+        float invD   = 1.0f / (std::fabs(r_dir) > 1e-8f ? r_dir : (r_dir < 0 ? -1e-8f : 1e-8f));
+        float t0 = (min_v - r_orig) * invD;
+        float t1 = (max_v - r_orig) * invD;
+        if (invD < 0.0f) std::swap(t0, t1);
+        t_min = t0 > t_min ? t0 : t_min;
+        t_max = t1 < t_max ? t1 : t_max;
+        if (t_max <= t_min) return false;
+    }
+    return true;
+}
+
+inline bool hit_triangle(const Ray& r, float t_min, float t_max, const Vec3& v0, const Vec3& v1, const Vec3& v2, const Vec3& normal, HitRecord& rec) {
+    Vec3 edge1 = v1 - v0;
+    Vec3 edge2 = v2 - v0;
+    Vec3 h = cross(r.direction, edge2);
+    float a = dot(edge1, h);
+    if (std::fabs(a) < 1e-7f) return false;
+    float f = 1.0f / a;
+    Vec3 s = r.origin - v0;
+    float u = f * dot(s, h);
+    if (u < 0.0f || u > 1.0f) return false;
+    Vec3 q = cross(s, edge1);
+    float v = f * dot(r.direction, q);
+    if (v < 0.0f || u + v > 1.0f) return false;
+    float t = f * dot(edge2, q);
+    if (t < t_min || t > t_max) return false;
+    rec.t = t;
+    rec.p = r.at(t);
+    rec.set_face_normal(r, normal);
+    return true;
+}
+
+class TriangleMesh : public Hittable {
+public:
+    Vec3 center;
+    float scale = 1.0f;
+    std::vector<Triangle> triangles;
+    Vec3 local_bmin;
+    Vec3 local_bmax;
+    std::shared_ptr<Material> mat;
+
+    TriangleMesh(const Vec3& c, float s, std::vector<Triangle> tris, const Vec3& bmin, const Vec3& bmax, std::shared_ptr<Material> m)
+        : center(c), scale(s), triangles(std::move(tris)), local_bmin(bmin), local_bmax(bmax), mat(std::move(m)) {}
+
+    bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override {
+        if (scale <= 1e-6f || triangles.empty()) return false;
+        float inv_s = 1.0f / scale;
+        Ray r_local((r.origin - center) * inv_s, r.direction * inv_s);
+
+        if (!hit_aabb(r_local, t_min, t_max, local_bmin, local_bmax)) {
+            return false;
+        }
+
+        HitRecord temp_rec;
+        bool hit_any = false;
+        float closest = t_max;
+
+        for (const auto& tri : triangles) {
+            if (hit_triangle(r_local, t_min, closest, tri.v0, tri.v1, tri.v2, tri.normal, temp_rec)) {
+                hit_any = true;
+                closest = temp_rec.t;
+                rec = temp_rec;
+            }
+        }
+
+        if (hit_any) {
+            rec.p = r.at(rec.t);
+            rec.mat = mat;
+        }
+        return hit_any;
+    }
+};
+
+inline bool LoadOBJGeometry(const std::wstring& filename, std::vector<Triangle>& out_triangles, Vec3& out_bmin, Vec3& out_bmax) {
+    FILE* fp = _wfopen(filename.c_str(), L"r");
+    if (!fp) return false;
+
+    std::vector<Vec3> temp_vertices;
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        if (line[0] == 'v' && line[1] == ' ') {
+            float x, y, z;
+            if (sscanf(line + 2, "%f %f %f", &x, &y, &z) == 3) {
+                temp_vertices.push_back(Vec3(x, y, z));
+            }
+        } else if (line[0] == 'f' && line[1] == ' ') {
+            std::vector<int> face_indices;
+            char* ptr = line + 2;
+            while (*ptr) {
+                while (*ptr && isspace((unsigned char)*ptr)) ptr++;
+                if (!*ptr) break;
+                int vi = 0;
+                if (sscanf(ptr, "%d", &vi) == 1) {
+                    if (vi > 0) vi -= 1;
+                    else if (vi < 0) vi = static_cast<int>(temp_vertices.size()) + vi;
+                    face_indices.push_back(vi);
+                }
+                while (*ptr && !isspace((unsigned char)*ptr)) ptr++;
+            }
+            for (size_t i = 1; i + 1 < face_indices.size(); ++i) {
+                int i0 = face_indices[0];
+                int i1 = face_indices[i];
+                int i2 = face_indices[i + 1];
+                if (i0 >= 0 && i0 < static_cast<int>(temp_vertices.size()) &&
+                    i1 >= 0 && i1 < static_cast<int>(temp_vertices.size()) &&
+                    i2 >= 0 && i2 < static_cast<int>(temp_vertices.size())) {
+                    Vec3 v0 = temp_vertices[i0];
+                    Vec3 v1 = temp_vertices[i1];
+                    Vec3 v2 = temp_vertices[i2];
+                    Vec3 norm = unit_vector(cross(v1 - v0, v2 - v0));
+                    if (norm.length_squared() < 1e-6f) norm = Vec3(0, 1, 0);
+                    out_triangles.push_back({v0, v1, v2, norm});
+                }
+            }
+        }
+    }
+    fclose(fp);
+
+    if (out_triangles.empty()) return false;
+
+    Vec3 bmin(1e9f, 1e9f, 1e9f), bmax(-1e9f, -1e9f, -1e9f);
+    for (const auto& tri : out_triangles) {
+        bmin.x = std::min({bmin.x, tri.v0.x, tri.v1.x, tri.v2.x});
+        bmin.y = std::min({bmin.y, tri.v0.y, tri.v1.y, tri.v2.y});
+        bmin.z = std::min({bmin.z, tri.v0.z, tri.v1.z, tri.v2.z});
+        bmax.x = std::max({bmax.x, tri.v0.x, tri.v1.x, tri.v2.x});
+        bmax.y = std::max({bmax.y, tri.v0.y, tri.v1.y, tri.v2.y});
+        bmax.z = std::max({bmax.z, tri.v0.z, tri.v1.z, tri.v2.z});
+    }
+
+    Vec3 center = 0.5f * (bmin + bmax);
+    Vec3 extents = bmax - bmin;
+    float max_dim = std::max({extents.x, extents.y, extents.z});
+    if (max_dim < 1e-6f) max_dim = 1.0f;
+    float norm_scale = 1.0f / max_dim;
+
+    out_bmin = Vec3(1e9f, 1e9f, 1e9f);
+    out_bmax = Vec3(-1e9f, -1e9f, -1e9f);
+
+    for (auto& tri : out_triangles) {
+        tri.v0 = (tri.v0 - center) * norm_scale;
+        tri.v1 = (tri.v1 - center) * norm_scale;
+        tri.v2 = (tri.v2 - center) * norm_scale;
+
+        out_bmin.x = std::min({out_bmin.x, tri.v0.x, tri.v1.x, tri.v2.x});
+        out_bmin.y = std::min({out_bmin.y, tri.v0.y, tri.v1.y, tri.v2.y});
+        out_bmin.z = std::min({out_bmin.z, tri.v0.z, tri.v1.z, tri.v2.z});
+        out_bmax.x = std::max({out_bmax.x, tri.v0.x, tri.v1.x, tri.v2.x});
+        out_bmax.y = std::max({out_bmax.y, tri.v0.y, tri.v1.y, tri.v2.y});
+        out_bmax.z = std::max({out_bmax.z, tri.v0.z, tri.v1.z, tri.v2.z});
+    }
+    out_bmin = out_bmin - Vec3(0.01f, 0.01f, 0.01f);
+    out_bmax = out_bmax + Vec3(0.01f, 0.01f, 0.01f);
+
+    return true;
 }
 
 class HittableList : public Hittable {
@@ -931,11 +1145,89 @@ struct Tile {
 struct EditableSceneObject {
     std::wstring name;
     Vec3 center;
-    float radius;
-    float secondary_param;
+    float radius = 1.0f;
+    float secondary_param = 0.0f;
     bool is_crystal = false;
+    bool is_mesh = false;
+    bool is_quad = false;
+
+    // For Quad
+    Vec3 quad_u = Vec3(1, 0, 0);
+    Vec3 quad_v = Vec3(0, 1, 0);
+
+    // For Mesh
+    std::shared_ptr<std::vector<Triangle>> mesh_triangles;
+    Vec3 mesh_bmin = Vec3(-1, -1, -1);
+    Vec3 mesh_bmax = Vec3(1, 1, 1);
+
+    // Material definition & properties
     std::shared_ptr<Material> material;
+    int mat_type = 0; // 0=Lambertian, 1=Metal, 2=Dielectric, 3=DiffuseLight
+    Vec3 mat_color = Vec3(0.8f, 0.8f, 0.8f);
+    float mat_param = 0.05f; // Roughness or IOR or Light intensity
 };
+
+inline void SetObjectMaterial(EditableSceneObject& obj, int type, const Vec3& col, float param) {
+    obj.mat_type = type;
+    obj.mat_color = col;
+    obj.mat_param = param;
+    if (type == 0) {
+        obj.material = std::make_shared<Lambertian>(col);
+    } else if (type == 1) {
+        obj.material = std::make_shared<Metal>(col, std::clamp(param, 0.001f, 1.0f));
+    } else if (type == 2) {
+        float ior = (param > 0.1f) ? param : 1.55f;
+        obj.material = std::make_shared<Dielectric>(ior);
+    } else if (type == 3) {
+        float intensity = (param > 0.01f) ? param : 1.0f;
+        obj.material = std::make_shared<DiffuseLight>(col * intensity);
+    }
+}
+
+inline EditableSceneObject make_sphere(const std::wstring& name, const Vec3& center, float r, int mat_type, const Vec3& col, float param = 0.05f) {
+    EditableSceneObject obj;
+    obj.name = name;
+    obj.center = center;
+    obj.radius = r;
+    SetObjectMaterial(obj, mat_type, col, param);
+    return obj;
+}
+
+inline EditableSceneObject make_crystal(const std::wstring& name, const Vec3& center, float r, float h, float ior = 1.55f) {
+    EditableSceneObject obj;
+    obj.name = name;
+    obj.center = center;
+    obj.radius = r;
+    obj.secondary_param = h;
+    obj.is_crystal = true;
+    SetObjectMaterial(obj, 2, Vec3(1.0f, 1.0f, 1.0f), ior);
+    return obj;
+}
+
+inline EditableSceneObject make_quad(const std::wstring& name, const Vec3& corner, const Vec3& u, const Vec3& v, int mat_type, const Vec3& col, float param = 0.05f) {
+    EditableSceneObject obj;
+    obj.name = name;
+    obj.center = corner;
+    obj.radius = 1.0f;
+    obj.is_quad = true;
+    obj.quad_u = u;
+    obj.quad_v = v;
+    SetObjectMaterial(obj, mat_type, col, param);
+    return obj;
+}
+
+inline std::shared_ptr<Hittable> CreateHittableFromObject(const EditableSceneObject& obj) {
+    if (obj.is_mesh && obj.mesh_triangles) {
+        return std::make_shared<TriangleMesh>(obj.center, obj.radius, *obj.mesh_triangles, obj.mesh_bmin, obj.mesh_bmax, obj.material);
+    } else if (obj.is_quad) {
+        return std::make_shared<Quad>(obj.center, obj.quad_u * obj.radius, obj.quad_v * obj.radius, obj.material);
+    } else if (obj.is_crystal) {
+        float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
+        return CreateFacetedCrystal(obj.center, obj.radius, h, obj.material);
+    } else {
+        return std::make_shared<Sphere>(obj.center, obj.radius, obj.material);
+    }
+}
 
 int g_canvas_view_width  = 800;
 int g_canvas_view_height = 450;
@@ -963,7 +1255,16 @@ constexpr int IDC_EDIT_PHOTONS   = 1019;
 constexpr int IDC_EDIT_FILENAME  = 1020;
 constexpr int IDC_BTN_GRAB       = 1021;
 constexpr int IDC_BTN_RESET_CAM  = 1022;
+constexpr int IDC_COMBO_SCENE    = 1023;
+constexpr int IDC_BTN_IMPORT_OBJ = 1024;
+constexpr int IDC_COMBO_MAT_TYPE = 1025;
+constexpr int IDC_EDIT_MAT_R     = 1026;
+constexpr int IDC_EDIT_MAT_G     = 1027;
+constexpr int IDC_EDIT_MAT_B     = 1028;
+constexpr int IDC_EDIT_MAT_PARAM = 1029;
+constexpr int IDC_BTN_APPLY_MAT  = 1030;
 
+int g_current_scene  = 0;
 int g_render_width   = 800;
 int g_render_height  = 450;
 int g_tile_size      = 32;
@@ -992,11 +1293,11 @@ size_t              g_total_tiles = 0;
 std::chrono::high_resolution_clock::time_point g_render_start_time;
 
 std::vector<EditableSceneObject> g_scene_objects = {
-    { L"1. Krysztal Szklany (Faceted Crystal)", Vec3(-0.5f, 0.70f, 0.1f), 0.65f, 1.40f, true,  std::make_shared<Dielectric>(1.55f) },
-    { L"2. Zrodlo Swiatla (Kat boczno-tylny)",   Vec3(3.2f, 2.4f, -1.2f),   0.85f, 0.0f,  false, std::make_shared<DiffuseLight>(Vec3(35.0f, 32.0f, 28.0f)) },
-    { L"3. Kula Zlota (Prawa)",                 Vec3(1.7f, 0.80f, 0.6f),   0.80f, 0.0f,  false, std::make_shared<Metal>(Vec3(0.95f, 0.78f, 0.35f), 0.02f) },
-    { L"4. Kula Rubinowa (Lewa-Tyl)",           Vec3(-2.0f, 0.65f, -0.6f), 0.65f, 0.0f,  false, std::make_shared<Lambertian>(Vec3(0.85f, 0.15f, 0.15f)) },
-    { L"5. Kula Chromowana (Przod)",            Vec3(0.7f, 0.35f, 1.7f),   0.35f, 0.0f,  false, std::make_shared<Metal>(Vec3(0.92f, 0.95f, 0.98f), 0.05f) }
+    make_crystal(L"1. Krysztal Szklany (Faceted Crystal)", Vec3(-0.5f, 0.70f, 0.1f), 0.65f, 1.40f, 1.55f),
+    make_sphere(L"2. Zrodlo Swiatla (Kat boczno-tylny)",   Vec3(3.2f, 2.4f, -1.2f),   0.85f, 3, Vec3(35.0f, 32.0f, 28.0f), 1.0f),
+    make_sphere(L"3. Kula Zlota (Prawa)",                 Vec3(1.7f, 0.80f, 0.6f),   0.80f, 1, Vec3(0.95f, 0.78f, 0.35f), 0.02f),
+    make_sphere(L"4. Kula Rubinowa (Lewa-Tyl)",           Vec3(-2.0f, 0.65f, -0.6f), 0.65f, 0, Vec3(0.85f, 0.15f, 0.15f), 0.0f),
+    make_sphere(L"5. Kula Chromowana (Przod)",            Vec3(0.7f, 0.35f, 1.7f),   0.35f, 1, Vec3(0.92f, 0.95f, 0.98f), 0.05f)
 };
 
 // ============================================================================
@@ -1034,6 +1335,12 @@ AxisLock g_axis_lock           = AXIS_NONE;
 
 HWND g_hWnd          = nullptr;
 HWND g_hCanvas       = nullptr;
+
+HWND g_hGroupScene   = nullptr;
+HWND g_hLblScene     = nullptr;
+HWND g_hComboScene   = nullptr;
+HWND g_hBtnImportObj = nullptr;
+
 HWND g_hGroupRender  = nullptr;
 HWND g_hLblAlgo      = nullptr;
 HWND g_hComboAlgo    = nullptr;
@@ -1069,6 +1376,16 @@ HWND g_hEditRadius   = nullptr;
 HWND g_hBtnApplyPos  = nullptr;
 HWND g_hBtnGrab      = nullptr;
 HWND g_hBtnResetCam  = nullptr;
+
+HWND g_hLblMatType   = nullptr;
+HWND g_hComboMatType = nullptr;
+HWND g_hLblMatCol    = nullptr;
+HWND g_hEditMatR     = nullptr;
+HWND g_hEditMatG     = nullptr;
+HWND g_hEditMatB     = nullptr;
+HWND g_hLblMatParam  = nullptr;
+HWND g_hEditMatParam = nullptr;
+HWND g_hBtnApplyMat  = nullptr;
 
 HWND g_hGroupSave    = nullptr;
 HWND g_hLblFile      = nullptr;
@@ -1132,21 +1449,11 @@ int RayPickObject(int mx, int my) {
     float closest_t = 1e9f;
 
     for (int i = 0; i < static_cast<int>(g_scene_objects.size()); ++i) {
-        const auto& obj = g_scene_objects[i];
+        auto h = CreateHittableFromObject(g_scene_objects[i]);
         HitRecord rec;
-        if (obj.is_crystal) {
-            float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
-            auto crystal = CreateFacetedCrystal(obj.center, obj.radius, h, obj.material);
-            if (crystal->hit(r, 0.001f, closest_t, rec)) {
-                closest_t = rec.t;
-                best_idx = i;
-            }
-        } else {
-            Sphere s(obj.center, obj.radius, obj.material);
-            if (s.hit(r, 0.001f, closest_t, rec)) {
-                closest_t = rec.t;
-                best_idx = i;
-            }
+        if (h->hit(r, 0.001f, closest_t, rec)) {
+            closest_t = rec.t;
+            best_idx = i;
         }
     }
     return best_idx;
@@ -1163,20 +1470,19 @@ void RenderFastPreview() {
 
     HittableList world;
     for (int i = 0; i < static_cast<int>(g_scene_objects.size()); ++i) {
-        const auto& obj = g_scene_objects[i];
-        if (obj.is_crystal) {
-            float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
-            world.add(CreateFacetedCrystal(obj.center, obj.radius, h, obj.material));
-        } else {
-            world.add(std::make_shared<Sphere>(obj.center, obj.radius, obj.material));
-        }
+        world.add(CreateHittableFromObject(g_scene_objects[i]));
     }
-    world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
-                                       std::make_shared<Lambertian>(Vec3(0.85f, 0.85f, 0.88f))));
+    if (g_current_scene == 0) {
+        world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
+                                           std::make_shared<Lambertian>(Vec3(0.85f, 0.85f, 0.88f))));
+    }
 
     Vec3 light_pos(3.2f, 2.4f, -1.2f);
-    if (g_scene_objects.size() > 1) {
-        light_pos = g_scene_objects[1].center;
+    for (const auto& obj : g_scene_objects) {
+        if (obj.material && !obj.material->emitted(obj.center).near_zero()) {
+            light_pos = obj.center;
+            break;
+        }
     }
 
     for (int py = 0; py < ph; ++py) {
@@ -1192,7 +1498,7 @@ void RenderFastPreview() {
             if (world.hit(r, 0.001f, 1e9f, rec)) {
                 Vec3 to_light = light_pos - rec.p;
                 float dist_l = to_light.length();
-                Vec3 dir_l = to_light / dist_l;
+                Vec3 dir_l = to_light / (dist_l > 1e-4f ? dist_l : 1.0f);
                 float diff = std::fmax(0.15f, dot(rec.normal, dir_l));
 
                 if (!rec.mat->emitted(rec.p).near_zero()) {
@@ -1271,6 +1577,210 @@ void UpdateObjectFieldsFromSelection(int index) {
 
     swprintf(buf, 64, L"%.2f", obj.radius);
     SetWindowTextW(g_hEditRadius, buf);
+
+    if (g_hComboMatType) {
+        SendMessage(g_hComboMatType, CB_SETCURSEL, obj.mat_type, 0);
+    }
+    if (g_hEditMatR) {
+        swprintf(buf, 64, L"%.2f", obj.mat_color.x);
+        SetWindowTextW(g_hEditMatR, buf);
+    }
+    if (g_hEditMatG) {
+        swprintf(buf, 64, L"%.2f", obj.mat_color.y);
+        SetWindowTextW(g_hEditMatG, buf);
+    }
+    if (g_hEditMatB) {
+        swprintf(buf, 64, L"%.2f", obj.mat_color.z);
+        SetWindowTextW(g_hEditMatB, buf);
+    }
+    if (g_hEditMatParam) {
+        swprintf(buf, 64, L"%.2f", obj.mat_param);
+        SetWindowTextW(g_hEditMatParam, buf);
+    }
+}
+
+void ApplyMaterialFromFields() {
+    int sel = static_cast<int>(SendMessage(g_hComboObjects, CB_GETCURSEL, 0, 0));
+    if (sel < 0 || sel >= static_cast<int>(g_scene_objects.size())) return;
+
+    int mat_type = static_cast<int>(SendMessage(g_hComboMatType, CB_GETCURSEL, 0, 0));
+    wchar_t bufR[32], bufG[32], bufB[32], bufP[32];
+    GetWindowTextW(g_hEditMatR, bufR, 32);
+    GetWindowTextW(g_hEditMatG, bufG, 32);
+    GetWindowTextW(g_hEditMatB, bufB, 32);
+    GetWindowTextW(g_hEditMatParam, bufP, 32);
+
+    float r = wcstof(bufR, nullptr);
+    float g = wcstof(bufG, nullptr);
+    float b = wcstof(bufB, nullptr);
+    float param = wcstof(bufP, nullptr);
+
+    SetObjectMaterial(g_scene_objects[sel], mat_type, Vec3(r, g, b), param);
+
+    const wchar_t* typeNames[] = { L"Lambertian (Matowy)", L"Metal (Zwierciadlany)", L"Dielectric (Szklo)", L"DiffuseLight (Swiatlo)" };
+    wchar_t msg[160];
+    swprintf(msg, 160, L"Zmieniono material [%s] na: %s (R:%.2f G:%.2f B:%.2f, Param:%.2f)",
+             g_scene_objects[sel].name.c_str(), typeNames[std::clamp(mat_type, 0, 3)], r, g, b, param);
+    SetWindowTextW(g_hStatusLabel, msg);
+
+    RenderFastPreview();
+    if (g_hCanvas) InvalidateRect(g_hCanvas, NULL, FALSE);
+}
+
+void ImportOBJModel() {
+    if (g_is_rendering.load()) {
+        MessageBoxW(g_hWnd, L"Renderowanie jest w toku! Przerwij renderowanie, aby zaimportowac model 3D.", L"Uwaga", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    wchar_t filename[MAX_PATH] = L"";
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(OPENFILENAMEW);
+    ofn.hwndOwner = g_hWnd;
+    ofn.lpstrFilter = L"Modele Wavefront OBJ (*.obj)\0*.obj\0Wszystkie pliki (*.*)\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+
+    if (GetOpenFileNameW(&ofn)) {
+        std::vector<Triangle> tris;
+        Vec3 bmin, bmax;
+        if (!LoadOBJGeometry(filename, tris, bmin, bmax)) {
+            MessageBoxW(g_hWnd, L"Nie udalo sie wczytac geometrii z pliku .OBJ lub plik nie zawiera trojkatow.", L"Blad importu OBJ", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        std::wstring pathStr(filename);
+        size_t lastSlash = pathStr.find_last_of(L"\\/");
+        std::wstring baseName = (lastSlash != std::wstring::npos) ? pathStr.substr(lastSlash + 1) : pathStr;
+
+        EditableSceneObject mesh_obj;
+        mesh_obj.name = L"Model: " + baseName;
+        mesh_obj.center = (g_current_scene == 0) ? Vec3(0.0f, 0.7f, 0.0f) : Vec3(0.0f, 0.5f, 0.2f);
+        mesh_obj.radius = 0.8f;
+        mesh_obj.is_mesh = true;
+        mesh_obj.mesh_triangles = std::make_shared<std::vector<Triangle>>(std::move(tris));
+        mesh_obj.mesh_bmin = bmin;
+        mesh_obj.mesh_bmax = bmax;
+        SetObjectMaterial(mesh_obj, 0, Vec3(0.85f, 0.75f, 0.65f), 0.05f);
+
+        g_scene_objects.push_back(mesh_obj);
+        int new_idx = static_cast<int>(g_scene_objects.size()) - 1;
+
+        if (g_hComboObjects) {
+            SendMessage(g_hComboObjects, CB_ADDSTRING, 0, (LPARAM)mesh_obj.name.c_str());
+            SendMessage(g_hComboObjects, CB_SETCURSEL, new_idx, 0);
+        }
+        g_selected_object_idx = new_idx;
+        UpdateObjectFieldsFromSelection(new_idx);
+
+        wchar_t status[240];
+        swprintf(status, 240, L"Zaimportowano pomyslnie [%s] (%zu trojkatow). Uzyj 'G', aby przesunac, 'S', aby skalowac, lub zmien material!",
+                 baseName.c_str(), mesh_obj.mesh_triangles->size());
+        SetWindowTextW(g_hStatusLabel, status);
+
+        RenderFastPreview();
+        if (g_hCanvas) InvalidateRect(g_hCanvas, NULL, FALSE);
+    }
+}
+
+void SwitchScene(int scene_id) {
+    g_current_scene = scene_id;
+
+    if (scene_id == 0) {
+        // Scena 1: Oryginalna scena z szlifowanym krysztalem i kulami
+        g_scene_objects = {
+            make_crystal(L"1. Krysztal Szklany (Faceted Crystal)", Vec3(-0.5f, 0.70f, 0.1f), 0.65f, 1.40f, 1.55f),
+            make_sphere(L"2. Zrodlo Swiatla (Kat boczno-tylny)",   Vec3(3.2f, 2.4f, -1.2f),   0.85f, 3, Vec3(35.0f, 32.0f, 28.0f), 1.0f),
+            make_sphere(L"3. Kula Zlota (Prawa)",                 Vec3(1.7f, 0.80f, 0.6f),   0.80f, 1, Vec3(0.95f, 0.78f, 0.35f), 0.02f),
+            make_sphere(L"4. Kula Rubinowa (Lewa-Tyl)",           Vec3(-2.0f, 0.65f, -0.6f), 0.65f, 0, Vec3(0.85f, 0.15f, 0.15f), 0.0f),
+            make_sphere(L"5. Kula Chromowana (Przod)",            Vec3(0.7f, 0.35f, 1.7f),   0.35f, 1, Vec3(0.92f, 0.95f, 0.98f), 0.05f)
+        };
+        g_cam_target   = Vec3(-0.3f, 0.5f, 0.0f);
+        g_cam_distance = 4.6f;
+        g_cam_yaw      = 0.05f;
+        g_cam_pitch    = 0.45f;
+        g_cam_fov      = 38.0f;
+    } else {
+        // Scena 2: Zamkniety pokoj z podluznym oknem, zewnetrznym zrodlem swiatla i zewnetrznym zwierciadlem
+        g_scene_objects.clear();
+
+        // 1. Krysztal szklany wewnatrz pokoju
+        g_scene_objects.push_back(
+            make_crystal(L"1. Krysztal w Pokoju (Refrakcja)", Vec3(0.0f, 0.55f, 0.2f), 0.50f, 1.10f, 1.55f)
+        );
+
+        // 2. Kula zlota wewnatrz pokoju
+        g_scene_objects.push_back(
+            make_sphere(L"2. Kula Zlota w Pokoju", Vec3(0.75f, 0.35f, 0.4f), 0.35f, 1, Vec3(0.95f, 0.78f, 0.35f), 0.03f)
+        );
+
+        // 3. Zewnetrzne zrodlo swiatla (za przeslona ochronna)
+        g_scene_objects.push_back(
+            make_sphere(L"3. Zewnetrzne Zrodlo Swiatla", Vec3(2.2f, 1.15f, 2.1f), 0.40f, 3, Vec3(70.0f, 65.0f, 55.0f), 1.0f)
+        );
+
+        // 4. Zewnetrzne lustro odbijajace swiatlo do wnetrza przez okno
+        g_scene_objects.push_back(
+            make_quad(L"4. Zewnetrzne Lustro (Reflektor)", Vec3(-2.0f, 0.0f, 3.2f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 2.4f, 0.0f), 1, Vec3(0.98f, 0.98f, 0.98f), 0.01f)
+        );
+
+        // 5. Zewnetrzna przeslona (Baffle uniemozliwiajacy oswietlenie bezposrednie)
+        g_scene_objects.push_back(
+            make_quad(L"5. Zewnetrzna Przeslona (Baffle)", Vec3(1.35f, 0.0f, 1.4f), Vec3(0.0f, 0.0f, 1.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.2f, 0.2f, 0.25f))
+        );
+
+        // 6-9. Sciana z podluznym oknem (Dol, Gora, Lewo, Prawo)
+        g_scene_objects.push_back(
+            make_quad(L"6. Sciana z Oknem (Panel Dolny)", Vec3(-2.0f, 0.0f, 1.4f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.95f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
+        );
+        g_scene_objects.push_back(
+            make_quad(L"7. Sciana z Oknem (Panel Gorny)", Vec3(-2.0f, 1.35f, 1.4f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 1.05f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
+        );
+        g_scene_objects.push_back(
+            make_quad(L"8. Sciana z Oknem (Panel Lewy)", Vec3(-2.0f, 0.95f, 1.4f), Vec3(0.8f, 0.0f, 0.0f), Vec3(0.0f, 0.40f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
+        );
+        g_scene_objects.push_back(
+            make_quad(L"9. Sciana z Oknem (Panel Prawy)", Vec3(1.2f, 0.95f, 1.4f), Vec3(0.8f, 0.0f, 0.0f), Vec3(0.0f, 0.40f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
+        );
+
+        // 10-14. Sciany zamknietego pokoju (Podloga, Sufit, Lewa, Prawa, Tylna za kamera)
+        g_scene_objects.push_back(
+            make_quad(L"10. Podloga Pokoju", Vec3(-2.0f, 0.0f, -2.0f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 3.4f), 0, Vec3(0.75f, 0.72f, 0.68f))
+        );
+        g_scene_objects.push_back(
+            make_quad(L"11. Sufit Pokoju", Vec3(-2.0f, 2.4f, -2.0f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 3.4f), 0, Vec3(0.82f, 0.82f, 0.82f))
+        );
+        g_scene_objects.push_back(
+            make_quad(L"12. Sciana Lewa", Vec3(-2.0f, 0.0f, -2.0f), Vec3(0.0f, 0.0f, 3.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.75f, 0.35f, 0.32f))
+        );
+        g_scene_objects.push_back(
+            make_quad(L"13. Sciana Prawa", Vec3(2.0f, 0.0f, 1.4f), Vec3(0.0f, 0.0f, -3.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.32f, 0.65f, 0.42f))
+        );
+        g_scene_objects.push_back(
+            make_quad(L"14. Sciana Tylna", Vec3(2.0f, 0.0f, -2.0f), Vec3(-4.0f, 0.0f, 0.0f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.68f, 0.68f, 0.72f))
+        );
+
+        // Kamera wewnatrz zamknietego pokoju skierowana na okno
+        g_cam_target   = Vec3(0.0f, 0.85f, 0.6f);
+        g_cam_distance = 1.9f;
+        g_cam_yaw      = 3.14159f;
+        g_cam_pitch    = -0.05f;
+        g_cam_fov      = 52.0f;
+    }
+
+    if (g_hComboObjects) {
+        SendMessage(g_hComboObjects, CB_RESETCONTENT, 0, 0);
+        for (const auto& obj : g_scene_objects) {
+            SendMessage(g_hComboObjects, CB_ADDSTRING, 0, (LPARAM)obj.name.c_str());
+        }
+        SendMessage(g_hComboObjects, CB_SETCURSEL, 0, 0);
+    }
+    g_selected_object_idx = 0;
+    UpdateObjectFieldsFromSelection(0);
+
+    RenderFastPreview();
+    if (g_hCanvas) InvalidateRect(g_hCanvas, NULL, FALSE);
 }
 
 void StartGrabMode() {
@@ -1460,14 +1970,22 @@ void ProcessScaleMove(int mx, int my) {
 }
 
 void ResetCamera() {
-    g_cam_target   = Vec3(-0.3f, 0.5f, 0.0f);
-    g_cam_distance = 4.6f;
-    g_cam_yaw      = 0.05f;
-    g_cam_pitch    = 0.45f;
-    g_cam_fov      = 38.0f;
+    if (g_current_scene == 0) {
+        g_cam_target   = Vec3(-0.3f, 0.5f, 0.0f);
+        g_cam_distance = 4.6f;
+        g_cam_yaw      = 0.05f;
+        g_cam_pitch    = 0.45f;
+        g_cam_fov      = 38.0f;
+    } else {
+        g_cam_target   = Vec3(0.0f, 0.85f, 0.6f);
+        g_cam_distance = 1.9f;
+        g_cam_yaw      = 3.14159f;
+        g_cam_pitch    = -0.05f;
+        g_cam_fov      = 52.0f;
+    }
     RenderFastPreview();
     InvalidateRect(g_hCanvas, NULL, FALSE);
-    SetWindowTextW(g_hStatusLabel, L"Zresetowano widok kamery 3D do kata poczatkowego.");
+    SetWindowTextW(g_hStatusLabel, L"Zresetowano widok kamery 3D do kata poczatkowego sceny.");
 }
 
 void ApplyPositionFromFields() {
@@ -1636,21 +2154,20 @@ void StartRendering() {
         std::shared_ptr<ConvexPolyhedron> glass_crystal = nullptr;
         float crystal_radius = 0.65f;
 
-        world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
-                                           std::make_shared<Lambertian>(Vec3(0.85f, 0.85f, 0.88f))));
+        if (g_current_scene == 0) {
+            world.add(std::make_shared<Sphere>(Vec3(0.0f, -1000.0f, 0.0f), 1000.0f,
+                                               std::make_shared<Lambertian>(Vec3(0.85f, 0.85f, 0.88f))));
+        }
 
         for (const auto& obj : g_scene_objects) {
+            world.add(CreateHittableFromObject(obj));
             if (obj.is_crystal) {
                 float h = obj.secondary_param > 0.1f ? obj.secondary_param : 1.40f;
                 crystal_radius = obj.radius;
                 glass_crystal = CreateFacetedCrystal(obj.center, obj.radius, h, obj.material);
-                world.add(glass_crystal);
-            } else {
-                auto sphere_ptr = std::make_shared<Sphere>(obj.center, obj.radius, obj.material);
-                world.add(sphere_ptr);
-                if (!obj.material->emitted(obj.center).near_zero()) {
-                    light_sources.push_back(*sphere_ptr);
-                }
+            }
+            if (obj.material && !obj.material->emitted(obj.center).near_zero()) {
+                light_sources.push_back(Sphere(obj.center, obj.radius, obj.material));
             }
         }
 
@@ -2566,7 +3083,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 void ResizeLayout(int clientW, int clientH) {
     if (clientW < 400 || clientH < 300) return;
 
-    int panelW = 380;
+    int panelW = 390;
     int sideX = clientW - panelW - 15;
     int canvasW = std::max(200, sideX - 25);
     int canvasH = std::max(150, clientH - 75);
@@ -2585,76 +3102,100 @@ void ResizeLayout(int clientW, int clientH) {
     }
 
     int curY = 15;
-    if (g_hGroupRender) MoveWindow(g_hGroupRender, sideX, curY, panelW, 240, TRUE);
+    // 1. Grupa: Scena 3D i Import OBJ
+    if (g_hGroupScene) MoveWindow(g_hGroupScene, sideX, curY, panelW, 82, TRUE);
+    curY += 20;
+    if (g_hLblScene) MoveWindow(g_hLblScene, sideX + 15, curY, 80, 20, TRUE);
+    if (g_hComboScene) MoveWindow(g_hComboScene, sideX + 100, curY - 2, 275, 150, TRUE);
+    curY += 26;
+    if (g_hBtnImportObj) MoveWindow(g_hBtnImportObj, sideX + 15, curY, 360, 28, TRUE);
 
-    curY += 22;
+    curY += 44;
+    // 2. Grupa: Parametry renderowania
+    if (g_hGroupRender) MoveWindow(g_hGroupRender, sideX, curY, panelW, 222, TRUE);
+    curY += 20;
     if (g_hLblAlgo) MoveWindow(g_hLblAlgo, sideX + 15, curY, 95, 20, TRUE);
-    if (g_hComboAlgo) MoveWindow(g_hComboAlgo, sideX + 115, curY - 2, 250, 150, TRUE);
+    if (g_hComboAlgo) MoveWindow(g_hComboAlgo, sideX + 115, curY - 2, 260, 150, TRUE);
 
-    curY += 27;
+    curY += 26;
     if (g_hLblPhotons) MoveWindow(g_hLblPhotons, sideX + 15, curY, 100, 20, TRUE);
     if (g_hEditPhotons) MoveWindow(g_hEditPhotons, sideX + 115, curY - 2, 85, 22, TRUE);
-    if (g_hLblPhotHint) MoveWindow(g_hLblPhotHint, sideX + 210, curY, 155, 20, TRUE);
+    if (g_hLblPhotHint) MoveWindow(g_hLblPhotHint, sideX + 210, curY, 165, 20, TRUE);
 
-    curY += 27;
+    curY += 26;
     if (g_hLblRes) MoveWindow(g_hLblRes, sideX + 15, curY, 95, 20, TRUE);
-    if (g_hComboRes) MoveWindow(g_hComboRes, sideX + 115, curY - 2, 250, 200, TRUE);
+    if (g_hComboRes) MoveWindow(g_hComboRes, sideX + 115, curY - 2, 260, 200, TRUE);
 
-    curY += 27;
+    curY += 26;
     if (g_hLblW) MoveWindow(g_hLblW, sideX + 15, curY, 80, 20, TRUE);
     if (g_hEditResW) MoveWindow(g_hEditResW, sideX + 100, curY - 2, 65, 22, TRUE);
     if (g_hLblH) MoveWindow(g_hLblH, sideX + 190, curY, 75, 20, TRUE);
     if (g_hEditResH) MoveWindow(g_hEditResH, sideX + 270, curY - 2, 65, 22, TRUE);
 
-    curY += 27;
+    curY += 26;
     if (g_hLblTile) MoveWindow(g_hLblTile, sideX + 15, curY, 95, 20, TRUE);
-    if (g_hComboTile) MoveWindow(g_hComboTile, sideX + 115, curY - 2, 250, 150, TRUE);
+    if (g_hComboTile) MoveWindow(g_hComboTile, sideX + 115, curY - 2, 260, 150, TRUE);
 
-    curY += 27;
+    curY += 26;
     if (g_hLblSPP) MoveWindow(g_hLblSPP, sideX + 15, curY, 80, 20, TRUE);
     if (g_hEditSPP) MoveWindow(g_hEditSPP, sideX + 100, curY - 2, 65, 22, TRUE);
     if (g_hLblDepth) MoveWindow(g_hLblDepth, sideX + 190, curY, 75, 20, TRUE);
     if (g_hEditDepth) MoveWindow(g_hEditDepth, sideX + 270, curY - 2, 65, 22, TRUE);
 
-    curY += 32;
-    if (g_hBtnRender) MoveWindow(g_hBtnRender, sideX + 15, curY, 195, 34, TRUE);
-    if (g_hBtnStop) MoveWindow(g_hBtnStop, sideX + 220, curY, 145, 34, TRUE);
+    curY += 30;
+    if (g_hBtnRender) MoveWindow(g_hBtnRender, sideX + 15, curY, 200, 32, TRUE);
+    if (g_hBtnStop) MoveWindow(g_hBtnStop, sideX + 225, curY, 150, 32, TRUE);
 
-    curY += 50;
-    if (g_hGroupObj) MoveWindow(g_hGroupObj, sideX, curY, panelW, 200, TRUE);
+    curY += 46;
+    // 3. Grupa: Obiekt, Pozycja & Material
+    if (g_hGroupObj) MoveWindow(g_hGroupObj, sideX, curY, panelW, 252, TRUE);
+    curY += 18;
+    if (g_hLblObj) MoveWindow(g_hLblObj, sideX + 15, curY, 90, 20, TRUE);
+    if (g_hComboObjects) MoveWindow(g_hComboObjects, sideX + 110, curY - 2, 265, 200, TRUE);
 
-    curY += 22;
-    if (g_hLblObj) MoveWindow(g_hLblObj, sideX + 15, curY, 110, 20, TRUE);
-    if (g_hComboObjects) MoveWindow(g_hComboObjects, sideX + 15, curY + 20, 350, 200, TRUE);
-
-    curY += 48;
+    curY += 25;
     if (g_hLblPosX) MoveWindow(g_hLblPosX, sideX + 15, curY, 75, 20, TRUE);
     if (g_hEditPosX) MoveWindow(g_hEditPosX, sideX + 90, curY - 2, 75, 22, TRUE);
     if (g_hLblRadius) MoveWindow(g_hLblRadius, sideX + 185, curY, 70, 20, TRUE);
     if (g_hEditRadius) MoveWindow(g_hEditRadius, sideX + 260, curY - 2, 80, 22, TRUE);
 
-    curY += 25;
+    curY += 24;
     if (g_hLblPosY) MoveWindow(g_hLblPosY, sideX + 15, curY, 75, 20, TRUE);
     if (g_hEditPosY) MoveWindow(g_hEditPosY, sideX + 90, curY - 2, 75, 22, TRUE);
-    if (g_hBtnApplyPos) MoveWindow(g_hBtnApplyPos, sideX + 185, curY - 2, 155, 26, TRUE);
+    if (g_hBtnApplyPos) MoveWindow(g_hBtnApplyPos, sideX + 185, curY - 2, 185, 24, TRUE);
 
-    curY += 25;
+    curY += 24;
     if (g_hLblPosZ) MoveWindow(g_hLblPosZ, sideX + 15, curY, 75, 20, TRUE);
     if (g_hEditPosZ) MoveWindow(g_hEditPosZ, sideX + 90, curY - 2, 75, 22, TRUE);
-    if (g_hBtnGrab) MoveWindow(g_hBtnGrab, sideX + 185, curY - 2, 155, 26, TRUE);
+    if (g_hBtnGrab) MoveWindow(g_hBtnGrab, sideX + 185, curY - 2, 185, 24, TRUE);
 
+    curY += 25;
+    if (g_hBtnResetCam) MoveWindow(g_hBtnResetCam, sideX + 185, curY - 2, 185, 24, TRUE);
+
+    // Sekcja Materialu wewnatrz grupy obiektow:
     curY += 28;
-    if (g_hBtnResetCam) MoveWindow(g_hBtnResetCam, sideX + 185, curY - 2, 155, 26, TRUE);
+    if (g_hLblMatType) MoveWindow(g_hLblMatType, sideX + 15, curY, 90, 20, TRUE);
+    if (g_hComboMatType) MoveWindow(g_hComboMatType, sideX + 110, curY - 2, 265, 150, TRUE);
 
-    curY += 34;
-    if (g_hGroupSave) MoveWindow(g_hGroupSave, sideX, curY, panelW, 85, TRUE);
-
-    curY += 20;
-    if (g_hLblFile) MoveWindow(g_hLblFile, sideX + 15, curY, 80, 20, TRUE);
-    if (g_hEditFilename) MoveWindow(g_hEditFilename, sideX + 100, curY - 2, 260, 22, TRUE);
+    curY += 25;
+    if (g_hLblMatCol) MoveWindow(g_hLblMatCol, sideX + 15, curY, 75, 20, TRUE);
+    if (g_hEditMatR) MoveWindow(g_hEditMatR, sideX + 90, curY - 2, 50, 22, TRUE);
+    if (g_hEditMatG) MoveWindow(g_hEditMatG, sideX + 145, curY - 2, 50, 22, TRUE);
+    if (g_hEditMatB) MoveWindow(g_hEditMatB, sideX + 200, curY - 2, 50, 22, TRUE);
+    if (g_hEditMatParam) MoveWindow(g_hEditMatParam, sideX + 260, curY - 2, 80, 22, TRUE);
 
     curY += 26;
-    if (g_hBtnSave) MoveWindow(g_hBtnSave, sideX + 15, curY, 350, 30, TRUE);
+    if (g_hBtnApplyMat) MoveWindow(g_hBtnApplyMat, sideX + 15, curY, 360, 26, TRUE);
+
+    curY += 36;
+    // 4. Grupa: Zapis PNG
+    if (g_hGroupSave) MoveWindow(g_hGroupSave, sideX, curY, panelW, 78, TRUE);
+    curY += 18;
+    if (g_hLblFile) MoveWindow(g_hLblFile, sideX + 15, curY, 80, 20, TRUE);
+    if (g_hEditFilename) MoveWindow(g_hEditFilename, sideX + 100, curY - 2, 275, 22, TRUE);
+
+    curY += 24;
+    if (g_hBtnSave) MoveWindow(g_hBtnSave, sideX + 15, curY, 360, 26, TRUE);
 
     // Renderujemy szybki podgląd tylko jeśli renderowanie PT nie trwa w tle!
     if (!g_is_rendering.load()) {
@@ -2688,17 +3229,41 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int sideX = 835;
             int curY = 15;
 
-            g_hGroupRender = CreateWindowW(L"BUTTON", L" Parametry renderowania & Kaustyka ",
+            // 1. Grupa: Scena 3D & Import OBJ
+            g_hGroupScene = CreateWindowW(L"BUTTON", L" Wybor Sceny 3D & Import Geometrii ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                sideX, curY, 380, 240, hWnd, nullptr, nullptr, nullptr);
+                sideX, curY, 390, 82, hWnd, nullptr, nullptr, nullptr);
+            SendMessage(g_hGroupScene, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            curY += 20;
+            g_hLblScene = CreateWindowW(L"STATIC", L"Scena 3D:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
+            SendMessage(g_hLblScene, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hComboScene = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                sideX + 100, curY - 2, 275, 150, hWnd, (HMENU)IDC_COMBO_SCENE, nullptr, nullptr);
+            SendMessage(g_hComboScene, WM_SETFONT, (WPARAM)hFont, TRUE);
+            SendMessage(g_hComboScene, CB_ADDSTRING, 0, (LPARAM)L"1. Krysztal Szklany & Kule (Kaustyka)");
+            SendMessage(g_hComboScene, CB_ADDSTRING, 0, (LPARAM)L"2. Zamkniety Pokoj ze Szczelina (Manifold)");
+            SendMessage(g_hComboScene, CB_SETCURSEL, 0, 0);
+
+            curY += 26;
+            g_hBtnImportObj = CreateWindowW(L"BUTTON", L"📂 Importuj model 3D Wavefront (.OBJ)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 15, curY, 360, 28, hWnd, (HMENU)IDC_BTN_IMPORT_OBJ, nullptr, nullptr);
+            SendMessage(g_hBtnImportObj, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            curY += 44;
+            // 2. Grupa: Parametry renderowania & Algorytm
+            g_hGroupRender = CreateWindowW(L"BUTTON", L" Parametry renderowania & Algorytm ",
+                WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                sideX, curY, 390, 222, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupRender, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 22;
+            curY += 20;
             g_hLblAlgo = CreateWindowW(L"STATIC", L"Algorytm PT:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 95, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblAlgo, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hComboAlgo = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                sideX + 115, curY - 2, 250, 150, hWnd, (HMENU)IDC_COMBO_ALGO, nullptr, nullptr);
+                sideX + 115, curY - 2, 260, 150, hWnd, (HMENU)IDC_COMBO_ALGO, nullptr, nullptr);
             SendMessage(g_hComboAlgo, WM_SETFONT, (WPARAM)hFont, TRUE);
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Standardowy Path Tracing (PT)");
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"BDPT (Globalna Mapa Fotonow - Krysztal)");
@@ -2706,7 +3271,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Manifold Exploration (MEMLT - Rozmaitosci)");
             SendMessage(g_hComboAlgo, CB_SETCURSEL, 1, 0);
 
-            curY += 27;
+            curY += 26;
             g_hLblPhotons = CreateWindowW(L"STATIC", L"Fotony kaustyki:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 100, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblPhotons, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -2714,15 +3279,15 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 sideX + 115, curY - 2, 85, 22, hWnd, (HMENU)IDC_EDIT_PHOTONS, nullptr, nullptr);
             SendMessage(g_hEditPhotons, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hLblPhotHint = CreateWindowW(L"STATIC", L"(np. 20000 - 150000)", WS_CHILD | WS_VISIBLE, sideX + 210, curY, 155, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblPhotHint = CreateWindowW(L"STATIC", L"(np. 20000 - 150000)", WS_CHILD | WS_VISIBLE, sideX + 210, curY, 165, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblPhotHint, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 27;
+            curY += 26;
             g_hLblRes = CreateWindowW(L"STATIC", L"Rozdzielczosc:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 95, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblRes, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hComboRes = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                sideX + 115, curY - 2, 250, 200, hWnd, (HMENU)IDC_COMBO_RES, nullptr, nullptr);
+                sideX + 115, curY - 2, 260, 200, hWnd, (HMENU)IDC_COMBO_RES, nullptr, nullptr);
             SendMessage(g_hComboRes, WM_SETFONT, (WPARAM)hFont, TRUE);
             SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"640 x 360  (Bardzo szybki podglad)");
             SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"800 x 450  (Standardowy podglad)");
@@ -2732,7 +3297,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"Niestandardowa (wpisz ponizej)");
             SendMessage(g_hComboRes, CB_SETCURSEL, 1, 0);
 
-            curY += 27;
+            curY += 26;
             g_hLblW = CreateWindowW(L"STATIC", L"Szerokosc W:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblW, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditResW = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"800", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 100, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_RES_W, nullptr, nullptr);
@@ -2743,19 +3308,19 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditResH = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"450", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 270, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_RES_H, nullptr, nullptr);
             SendMessage(g_hEditResH, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 27;
+            curY += 26;
             g_hLblTile = CreateWindowW(L"STATIC", L"Kafelek (Tiling):", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 95, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblTile, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hComboTile = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                sideX + 115, curY - 2, 250, 150, hWnd, (HMENU)IDC_COMBO_TILE, nullptr, nullptr);
+                sideX + 115, curY - 2, 260, 150, hWnd, (HMENU)IDC_COMBO_TILE, nullptr, nullptr);
             SendMessage(g_hComboTile, WM_SETFONT, (WPARAM)hFont, TRUE);
             SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"16 x 16 px (Drobny - bez szwow)");
             SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"32 x 32 px (Standardowy - optymalny)");
             SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"64 x 64 px (Duze kafelki)");
             SendMessage(g_hComboTile, CB_SETCURSEL, 0, 0);
 
-            curY += 27;
+            curY += 26;
             g_hLblSPP = CreateWindowW(L"STATIC", L"Probki (SPP):", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblSPP, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditSPP = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"64", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 100, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_SPP, nullptr, nullptr);
@@ -2766,36 +3331,32 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditDepth = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"16", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 270, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_DEPTH, nullptr, nullptr);
             SendMessage(g_hEditDepth, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 32;
+            curY += 30;
             g_hBtnRender = CreateWindowW(L"BUTTON", L"▶ Rozpocznij renderowanie", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                sideX + 15, curY, 195, 34, hWnd, (HMENU)IDC_BTN_RENDER, nullptr, nullptr);
+                sideX + 15, curY, 200, 32, hWnd, (HMENU)IDC_BTN_RENDER, nullptr, nullptr);
             SendMessage(g_hBtnRender, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hBtnStop = CreateWindowW(L"BUTTON", L"⏹ Przerwij", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                sideX + 220, curY, 145, 34, hWnd, (HMENU)IDC_BTN_STOP, nullptr, nullptr);
+                sideX + 225, curY, 150, 32, hWnd, (HMENU)IDC_BTN_STOP, nullptr, nullptr);
             SendMessage(g_hBtnStop, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 50;
+            curY += 46;
 
-            g_hGroupObj = CreateWindowW(L"BUTTON", L" Przesuwanie przedmiotow (Blender 3D) ",
+            // 3. Grupa: Obiekt, Pozycja & Material
+            g_hGroupObj = CreateWindowW(L"BUTTON", L" Edycja Obiektu, Pozycji (Blender 3D) & Materialu ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                sideX, curY, 380, 200, hWnd, nullptr, nullptr, nullptr);
+                sideX, curY, 390, 252, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupObj, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 22;
-            g_hLblObj = CreateWindowW(L"STATIC", L"Wybierz obiekt:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 110, 20, hWnd, nullptr, nullptr, nullptr);
+            curY += 18;
+            g_hLblObj = CreateWindowW(L"STATIC", L"Wybierz obiekt:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 90, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblObj, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hComboObjects = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                sideX + 15, curY + 20, 350, 200, hWnd, (HMENU)IDC_COMBO_OBJECTS, nullptr, nullptr);
+                sideX + 110, curY - 2, 265, 200, hWnd, (HMENU)IDC_COMBO_OBJECTS, nullptr, nullptr);
             SendMessage(g_hComboObjects, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            for (const auto& obj : g_scene_objects) {
-                SendMessage(g_hComboObjects, CB_ADDSTRING, 0, (LPARAM)obj.name.c_str());
-            }
-            SendMessage(g_hComboObjects, CB_SETCURSEL, 0, 0);
-
-            curY += 48;
+            curY += 25;
             g_hLblPosX = CreateWindowW(L"STATIC", L"Pozycja X:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblPosX, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditPosX = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.00", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 75, 22, hWnd, nullptr, nullptr, nullptr);
@@ -2806,52 +3367,86 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditRadius = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.65", WS_CHILD | WS_VISIBLE, sideX + 260, curY - 2, 80, 22, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hEditRadius, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 25;
+            curY += 24;
             g_hLblPosY = CreateWindowW(L"STATIC", L"Pozycja Y:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblPosY, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditPosY = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.00", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 75, 22, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hEditPosY, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hBtnApplyPos = CreateWindowW(L"BUTTON", L"Zastosuj recznie", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                sideX + 185, curY - 2, 155, 26, hWnd, (HMENU)IDC_BTN_APPLY_POS, nullptr, nullptr);
+            g_hBtnApplyPos = CreateWindowW(L"BUTTON", L"Zastosuj pozycje", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 185, curY - 2, 185, 24, hWnd, (HMENU)IDC_BTN_APPLY_POS, nullptr, nullptr);
             SendMessage(g_hBtnApplyPos, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 25;
+            curY += 24;
             g_hLblPosZ = CreateWindowW(L"STATIC", L"Pozycja Z:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblPosZ, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditPosZ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.00", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 75, 22, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hEditPosZ, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hBtnGrab = CreateWindowW(L"BUTTON", L"✋ Przesun w 3D (Klawisz G)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                sideX + 185, curY - 2, 155, 26, hWnd, (HMENU)IDC_BTN_GRAB, nullptr, nullptr);
+            g_hBtnGrab = CreateWindowW(L"BUTTON", L"✋ Przesun w 3D (G)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 185, curY - 2, 185, 24, hWnd, (HMENU)IDC_BTN_GRAB, nullptr, nullptr);
             SendMessage(g_hBtnGrab, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 28;
+            curY += 25;
             g_hBtnResetCam = CreateWindowW(L"BUTTON", L"🎥 Reset kamery 3D", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                sideX + 185, curY - 2, 155, 26, hWnd, (HMENU)IDC_BTN_RESET_CAM, nullptr, nullptr);
+                sideX + 185, curY - 2, 185, 24, hWnd, (HMENU)IDC_BTN_RESET_CAM, nullptr, nullptr);
             SendMessage(g_hBtnResetCam, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            UpdateObjectFieldsFromSelection(0);
+            // Material Editor wewnatrz grupy obiektow:
+            curY += 28;
+            g_hLblMatType = CreateWindowW(L"STATIC", L"Material:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 90, 20, hWnd, nullptr, nullptr, nullptr);
+            SendMessage(g_hLblMatType, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 34;
+            g_hComboMatType = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                sideX + 110, curY - 2, 265, 150, hWnd, (HMENU)IDC_COMBO_MAT_TYPE, nullptr, nullptr);
+            SendMessage(g_hComboMatType, WM_SETFONT, (WPARAM)hFont, TRUE);
+            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Lambertian (Matowy / Rozproszony)");
+            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Metal (Zwierciadlany / Lustro)");
+            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Dielectric (Szklo / Krysztal)");
+            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"DiffuseLight (Emisja Swiatla)");
+            SendMessage(g_hComboMatType, CB_SETCURSEL, 0, 0);
 
+            curY += 25;
+            g_hLblMatCol = CreateWindowW(L"STATIC", L"RGB / Param:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
+            SendMessage(g_hLblMatCol, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hEditMatR = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.85", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 50, 22, hWnd, (HMENU)IDC_EDIT_MAT_R, nullptr, nullptr);
+            SendMessage(g_hEditMatR, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hEditMatG = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.85", WS_CHILD | WS_VISIBLE, sideX + 145, curY - 2, 50, 22, hWnd, (HMENU)IDC_EDIT_MAT_G, nullptr, nullptr);
+            SendMessage(g_hEditMatG, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hEditMatB = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.85", WS_CHILD | WS_VISIBLE, sideX + 200, curY - 2, 50, 22, hWnd, (HMENU)IDC_EDIT_MAT_B, nullptr, nullptr);
+            SendMessage(g_hEditMatB, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            g_hEditMatParam = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.05", WS_CHILD | WS_VISIBLE, sideX + 260, curY - 2, 80, 22, hWnd, (HMENU)IDC_EDIT_MAT_PARAM, nullptr, nullptr);
+            SendMessage(g_hEditMatParam, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            curY += 26;
+            g_hBtnApplyMat = CreateWindowW(L"BUTTON", L"🎨 Zastosuj Material do Wybranego Obiektu", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                sideX + 15, curY, 360, 26, hWnd, (HMENU)IDC_BTN_APPLY_MAT, nullptr, nullptr);
+            SendMessage(g_hBtnApplyMat, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            curY += 36;
+
+            // 4. Grupa: Zapis PNG
             g_hGroupSave = CreateWindowW(L"BUTTON", L" Zapis obrazu do pliku PNG ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                sideX, curY, 380, 85, hWnd, nullptr, nullptr, nullptr);
+                sideX, curY, 390, 78, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupSave, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 20;
+            curY += 18;
             g_hLblFile = CreateWindowW(L"STATIC", L"Nazwa pliku:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblFile, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hEditFilename = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"render_kaustyka.png", WS_CHILD | WS_VISIBLE,
-                sideX + 100, curY - 2, 260, 22, hWnd, (HMENU)IDC_EDIT_FILENAME, nullptr, nullptr);
+                sideX + 100, curY - 2, 275, 22, hWnd, (HMENU)IDC_EDIT_FILENAME, nullptr, nullptr);
             SendMessage(g_hEditFilename, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            curY += 26;
+            curY += 24;
             g_hBtnSave = CreateWindowW(L"BUTTON", L"💾 Zapisz obraz PNG",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                sideX + 15, curY, 350, 30, hWnd, (HMENU)IDC_BTN_SAVE_PNG, nullptr, nullptr);
+                sideX + 15, curY, 360, 26, hWnd, (HMENU)IDC_BTN_SAVE_PNG, nullptr, nullptr);
             SendMessage(g_hBtnSave, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
@@ -2863,7 +3458,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 15, 510, g_canvas_view_width + 390, 24, hWnd, (HMENU)IDC_STATUS_LABEL, nullptr, nullptr);
             SendMessage(g_hStatusLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            RenderFastPreview();
+            SwitchScene(0);
+
             SetTimer(hWnd, TIMER_UPDATE_ID, 33, nullptr);
             break;
         }
@@ -2976,7 +3572,17 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int wmId = LOWORD(wParam);
             int wmEvent = HIWORD(wParam);
 
-            if (wmId == IDC_COMBO_ALGO && wmEvent == CBN_SELCHANGE) {
+            if (wmId == IDC_COMBO_SCENE && wmEvent == CBN_SELCHANGE) {
+                int sel = static_cast<int>(SendMessage(g_hComboScene, CB_GETCURSEL, 0, 0));
+                SwitchScene(sel);
+            }
+            else if (wmId == IDC_BTN_IMPORT_OBJ) {
+                ImportOBJModel();
+            }
+            else if (wmId == IDC_BTN_APPLY_MAT) {
+                ApplyMaterialFromFields();
+            }
+            else if (wmId == IDC_COMBO_ALGO && wmEvent == CBN_SELCHANGE) {
                 int sel = static_cast<int>(SendMessage(g_hComboAlgo, CB_GETCURSEL, 0, 0));
                 g_render_algo = sel;
                 if (sel == 2 || sel == 3) {
@@ -3052,12 +3658,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     RegisterClassW(&wc);
 
-    int winWidth  = 1265;
-    int winHeight = 615;
+    int winWidth  = 1320;
+    int winHeight = 720;
 
     g_hWnd = CreateWindowW(
         L"PathTracerMainWindow",
-        L"Path Tracer 3D - Interaktywny Blender 3D Viewport, Szlifowany Krysztal & BDPT",
+        L"Path Tracer 3D - Blender Viewport, Manifold Exploration Room & OBJ Importer",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         winWidth, winHeight,
@@ -3083,7 +3689,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
                 HWND hFocus = GetFocus();
                 bool isEditing = (hFocus == g_hEditPosX || hFocus == g_hEditPosY || hFocus == g_hEditPosZ ||
                                   hFocus == g_hEditRadius || hFocus == g_hEditFilename || hFocus == g_hEditPhotons ||
-                                  hFocus == g_hEditSPP || hFocus == g_hEditDepth || hFocus == g_hEditResW || hFocus == g_hEditResH);
+                                  hFocus == g_hEditSPP || hFocus == g_hEditDepth || hFocus == g_hEditResW || hFocus == g_hEditResH ||
+                                  hFocus == g_hEditMatR || hFocus == g_hEditMatG || hFocus == g_hEditMatB || hFocus == g_hEditMatParam);
                 if (!isEditing || g_is_grabbing || g_is_scaling) {
                     SendMessage(g_hCanvas, WM_KEYDOWN, msg.wParam, msg.lParam);
                     continue;

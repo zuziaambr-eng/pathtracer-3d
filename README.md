@@ -57,6 +57,30 @@ Kompletny zestaw narzędzi do renderowania metodą **Path Tracingu** (Monte Carl
     - **Perturbacja rozmaitości (*Manifold Perturbation*, Sekcja 5.1 & Rysunek 5, 6)**: Płynne poruszanie się wzdłuż krawędzi i pasm kaustycznych szlifowanego kryształu bez utraty połączenia ze źródłem światła.
     - **Test odwracalności (*Reversibility*, Sekcja 5.1)**: Weryfikacja powrotnego spaceru gwarantuje pełną odwracalność i zachowanie Detailed Balance w łańcuchu Markowa.
 
+11. **Druga Scena Testowa: Zamknięty Pokój ze Szczeliną Okienną (Benchmark Manifold Exploration)**:
+    - Kamera umieszczona wewnątrz zamkniętego pokoju.
+    - W przedniej ścianie znajduje się wąskie, podłużne okno szczelinowe.
+    - Kuliste źródło światła umieszczone na zewnątrz za nieprzezroczystą przesłoną (*baffle*) – brak bezpośredniego widoku ze szczeliny na źródło światła.
+    - Światło wpada do wnętrza pokoju **wyłącznie po odbiciu od zewnętrznej ściany zwierciadlanej (lustra)**.
+    - Wewnątrz pokoju umieszczony jest szklany kryształ i złota kula, tworzące załamania i kaustykę z wpadającego promienia światła.
+    - Klasyczny problem wąskiej apertury i pośredniego transportu zwierciadlanego – idealny do demonstracji potęgi Manifold Exploration (MEMLT) nad klasycznym PT i BDPT!
+
+12. **Interaktywny Edytor Materiałów w Czasie Rzeczywistym**:
+    - Możliwość zmiany typu materiału dla dowolnego zaznaczonego obiektu:
+      - `Lambertian` (matowy, rozpraszający)
+      - `Metal` (zwierciadlany, lustrzany)
+      - `Dielectric` (szkło, kryształ, refrakcyjny)
+      - `DiffuseLight` (emisyjny, źródło światła)
+    - Wygodna edycja parametrów w GUI: kolor RGB, chropowatość (*Roughness* dla metalu), współczynnik załamania (*IOR* dla dielektryka) oraz moc świecenia (*Intensity* dla światła).
+    - Przycisk `🎨 Zastosuj Materiał do Wybranego Obiektu` natychmiastowo aktualizuje podgląd 3D.
+
+13. **Uniwersalny Importer Geometrii 3D (Wavefront .OBJ)**:
+    - Przycisk `📂 Importuj model 3D Wavefront (.OBJ)` z natywnym oknem dialogowym Windows.
+    - Automatyczne parsowanie wierzchołków (`v`) i ścian (`f`), triangulacja polygonów.
+    - Automatyczne centrowanie i normalizacja skali siatki do przestrzeni roboczej sceny.
+    - Akceleracja AABB (Bounding Box) + szybki algorytm Möllera-Trumbore dla przecięcia promienia z trójkątami.
+    - Pełna integracja z silnikiem manipulacji: zaimportowany model można wybierać myszką, przesuwać klawiszem `G`, skalować `S`, blokować osie `X/Y/Z` oraz nakładać na niego dowolne materiały (szkło, złoto, emiter światła, matowy). Dołączono przykładowe pliki `diamond.obj` oraz `test_pyramid.obj`.
+
 ---
 
 ## Uruchomienie
@@ -68,5 +92,5 @@ Dwukrotny klik na **`pathtracer_gui.exe`** w folderze roboczym lub w terminalu:
 
 ### Kompilacja (LLVM Clang++):
 ```powershell
-clang++ -std=c++17 -O3 gui_main.cpp -o pathtracer_gui.exe -lgdi32 -luser32 -lcomctl32 -mwindows
+clang++ -std=c++17 -O3 gui_main.cpp -o pathtracer_gui.exe -lgdi32 -luser32 -lcomctl32 -lcomdlg32 -mwindows
 ```
