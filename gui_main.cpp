@@ -1810,11 +1810,11 @@ void RenderFastPreview() {
 
 void ExportSceneToOBJ() {
     if (g_is_rendering.load()) {
-        MessageBoxW(g_hWnd, L"Renderowanie jest w toku! Przerwij renderowanie, aby wyeksportowac scene.", L"Uwaga", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hWnd, L"Renderowanie jest w toku! Przerwij renderowanie, aby wyeksportować scenę.", L"Uwaga", MB_OK | MB_ICONWARNING);
         return;
     }
 
-    wchar_t filename[MAX_PATH] = L"scena_eksport.obj";
+    wchar_t filename[MAX_PATH] = L"scena-eksport.obj";
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(OPENFILENAMEW);
     ofn.hwndOwner = g_hWnd;
@@ -1826,7 +1826,7 @@ void ExportSceneToOBJ() {
     if (GetSaveFileNameW(&ofn)) {
         FILE* fp = _wfopen(filename, L"w");
         if (!fp) {
-            MessageBoxW(g_hWnd, L"Nie mozna utworzyc pliku docelowego do zapisu sceny.", L"Blad zapisu OBJ", MB_OK | MB_ICONERROR);
+            MessageBoxW(g_hWnd, L"Nie można utworzyć pliku docelowego do zapisu sceny.", L"Błąd zapisu OBJ", MB_OK | MB_ICONERROR);
             return;
         }
 
@@ -1962,9 +1962,9 @@ void ExportSceneToOBJ() {
         fclose(fp);
 
         wchar_t msg[300];
-        swprintf(msg, 300, L"Wyeksportowano pomyslnie %zu obiektow do pliku Wavefront OBJ!\nPlik docelowy:\n%s",
+        swprintf(msg, 300, L"Wyeksportowano pomyślnie %zu obiektów do pliku Wavefront OBJ!\nPlik docelowy:\n%s",
                  g_scene_objects.size(), filename);
-        MessageBoxW(g_hWnd, msg, L"Eksport Sceny 3D Zakonczony", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_hWnd, msg, L"Eksport sceny 3D zakończony", MB_OK | MB_ICONINFORMATION);
     }
 }
 
@@ -2033,9 +2033,9 @@ void ApplyMaterialFromFields() {
 
     SetObjectMaterial(g_scene_objects[sel], mat_type, Vec3(r, g, b), param, disp);
 
-    const wchar_t* typeNames[] = { L"Lambertian (Matowy)", L"Metal (Zwierciadlany)", L"Dielectric (Szklo)", L"DiffuseLight (Swiatlo)" };
+    const wchar_t* typeNames[] = { L"Lambertian (matowy)", L"Metal (zwierciadlany)", L"Dielectric (szkło)", L"DiffuseLight (światło)" };
     wchar_t msg[200];
-    swprintf(msg, 200, L"Zmieniono material [%s] na: %s (R:%.2f G:%.2f B:%.2f, Param:%.2f, Dyspersja:%.3f)",
+    swprintf(msg, 200, L"Zmieniono materiał [%s] na: %s (R: %.2f, G: %.2f, B: %.2f, parametr: %.2f, dyspersja: %.3f)",
              g_scene_objects[sel].name.c_str(), typeNames[std::clamp(mat_type, 0, 3)], r, g, b, param, disp);
     SetWindowTextW(g_hStatusLabel, msg);
 
@@ -2045,7 +2045,7 @@ void ApplyMaterialFromFields() {
 
 void ImportOBJModel() {
     if (g_is_rendering.load()) {
-        MessageBoxW(g_hWnd, L"Renderowanie jest w toku! Przerwij renderowanie, aby zaimportowac model 3D.", L"Uwaga", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hWnd, L"Renderowanie jest w toku! Przerwij renderowanie, aby zaimportować model 3D.", L"Uwaga", MB_OK | MB_ICONWARNING);
         return;
     }
 
@@ -2062,7 +2062,7 @@ void ImportOBJModel() {
         std::vector<Triangle> tris;
         Vec3 bmin, bmax;
         if (!LoadOBJGeometry(filename, tris, bmin, bmax)) {
-            MessageBoxW(g_hWnd, L"Nie udalo sie wczytac geometrii z pliku .OBJ lub plik nie zawiera trojkatow.", L"Blad importu OBJ", MB_OK | MB_ICONERROR);
+            MessageBoxW(g_hWnd, L"Nie udało się wczytać geometrii z pliku .OBJ lub plik nie zawiera trójkątów.", L"Błąd importu OBJ", MB_OK | MB_ICONERROR);
             return;
         }
 
@@ -2091,7 +2091,7 @@ void ImportOBJModel() {
         UpdateObjectFieldsFromSelection(new_idx);
 
         wchar_t status[240];
-        swprintf(status, 240, L"Zaimportowano pomyslnie [%s] (%zu trojkatow). Uzyj 'G', aby przesunac, 'S', aby skalowac, lub zmien material!",
+        swprintf(status, 240, L"Zaimportowano pomyślnie [%s] (%zu trójkątów). Użyj 'G', aby przesunąć, 'S', aby skalować, lub zmień materiał!",
                  baseName.c_str(), mesh_obj.mesh_triangles->size());
         SetWindowTextW(g_hStatusLabel, status);
 
@@ -2108,11 +2108,11 @@ void SwitchScene(int scene_id) {
     if (scene_id == 0) {
         // Scena 1: Oryginalna scena z szlifowanym krysztalem i kulami
         g_scene_objects = {
-            make_crystal(L"1. Krysztal Szklany (Faceted Crystal)", Vec3(-0.5f, 0.70f, 0.1f), 0.65f, 1.40f, 1.55f),
-            make_sphere(L"2. Zrodlo Swiatla (Kat boczno-tylny)",   Vec3(3.2f, 2.4f, -1.2f),   0.85f, 3, Vec3(35.0f, 32.0f, 28.0f), 1.0f),
-            make_sphere(L"3. Kula Zlota (Prawa)",                 Vec3(1.7f, 0.80f, 0.6f),   0.80f, 1, Vec3(0.95f, 0.78f, 0.35f), 0.02f),
-            make_sphere(L"4. Kula Rubinowa (Lewa-Tyl)",           Vec3(-2.0f, 0.65f, -0.6f), 0.65f, 0, Vec3(0.85f, 0.15f, 0.15f), 0.0f),
-            make_sphere(L"5. Kula Chromowana (Przod)",            Vec3(0.7f, 0.35f, 1.7f),   0.35f, 1, Vec3(0.92f, 0.95f, 0.98f), 0.05f)
+            make_crystal(L"1. Kryształ szklany (Faceted Crystal)", Vec3(-0.5f, 0.70f, 0.1f), 0.65f, 1.40f, 1.55f),
+            make_sphere(L"2. Źródło światła (kąt boczno-tylny)",   Vec3(3.2f, 2.4f, -1.2f),   0.85f, 3, Vec3(35.0f, 32.0f, 28.0f), 1.0f),
+            make_sphere(L"3. Kula złota (prawa)",                 Vec3(1.7f, 0.80f, 0.6f),   0.80f, 1, Vec3(0.95f, 0.78f, 0.35f), 0.02f),
+            make_sphere(L"4. Kula rubinowa (lewa-tył)",           Vec3(-2.0f, 0.65f, -0.6f), 0.65f, 0, Vec3(0.85f, 0.15f, 0.15f), 0.0f),
+            make_sphere(L"5. Kula chromowana (przód)",            Vec3(0.7f, 0.35f, 1.7f),   0.35f, 1, Vec3(0.92f, 0.95f, 0.98f), 0.05f)
         };
         g_cam_target   = Vec3(-0.3f, 0.5f, 0.0f);
         g_cam_distance = 4.6f;
@@ -2120,63 +2120,63 @@ void SwitchScene(int scene_id) {
         g_cam_pitch    = 0.45f;
         g_cam_fov      = 38.0f;
     } else {
-        // Scena 2: Zamkniety pokoj z podluznym oknem, zewnetrznym zrodlem swiatla i zewnetrznym zwierciadlem
+        // Scena 2: Zamknięty pokój z podłużnym oknem, zewnętrznym źródłem światła i zewnętrznym zwierciadłem
         g_scene_objects.clear();
 
-        // 1. Krysztal szklany wewnatrz pokoju
+        // 1. Kryształ szklany wewnątrz pokoju
         g_scene_objects.push_back(
-            make_crystal(L"1. Krysztal w Pokoju (Refrakcja)", Vec3(0.0f, 0.55f, 0.2f), 0.50f, 1.10f, 1.55f)
+            make_crystal(L"1. Kryształ w pokoju (refrakcja)", Vec3(0.0f, 0.55f, 0.2f), 0.50f, 1.10f, 1.55f)
         );
 
-        // 2. Kula zlota wewnatrz pokoju
+        // 2. Kula złota wewnątrz pokoju
         g_scene_objects.push_back(
-            make_sphere(L"2. Kula Zlota w Pokoju", Vec3(0.75f, 0.35f, 0.4f), 0.35f, 1, Vec3(0.95f, 0.78f, 0.35f), 0.03f)
+            make_sphere(L"2. Kula złota w pokoju", Vec3(0.75f, 0.35f, 0.4f), 0.35f, 1, Vec3(0.95f, 0.78f, 0.35f), 0.03f)
         );
 
-        // 3. Zewnetrzne zrodlo swiatla (za przeslona ochronna)
+        // 3. Zewnętrzne źródło światła (za przesłoną ochronną)
         g_scene_objects.push_back(
-            make_sphere(L"3. Zewnetrzne Zrodlo Swiatla", Vec3(2.2f, 1.15f, 2.1f), 0.40f, 3, Vec3(70.0f, 65.0f, 55.0f), 1.0f)
+            make_sphere(L"3. Zewnętrzne źródło światła", Vec3(2.2f, 1.15f, 2.1f), 0.40f, 3, Vec3(70.0f, 65.0f, 55.0f), 1.0f)
         );
 
-        // 4. Zewnetrzne lustro odbijajace swiatlo do wnetrza przez okno
+        // 4. Zewnętrzne lustro odbijające światło do wnętrza przez okno
         g_scene_objects.push_back(
-            make_quad(L"4. Zewnetrzne Lustro (Reflektor)", Vec3(-2.0f, 0.0f, 3.2f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 2.4f, 0.0f), 1, Vec3(0.98f, 0.98f, 0.98f), 0.01f)
+            make_quad(L"4. Zewnętrzne lustro (reflektor)", Vec3(-2.0f, 0.0f, 3.2f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 2.4f, 0.0f), 1, Vec3(0.98f, 0.98f, 0.98f), 0.01f)
         );
 
-        // 5. Zewnetrzna przeslona (Baffle uniemozliwiajacy oswietlenie bezposrednie)
+        // 5. Zewnętrzna przesłona (baffle uniemożliwiający oświetlenie bezpośrednie)
         g_scene_objects.push_back(
-            make_quad(L"5. Zewnetrzna Przeslona (Baffle)", Vec3(1.35f, 0.0f, 1.4f), Vec3(0.0f, 0.0f, 1.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.2f, 0.2f, 0.25f))
+            make_quad(L"5. Zewnętrzna przesłona (baffle)", Vec3(1.35f, 0.0f, 1.4f), Vec3(0.0f, 0.0f, 1.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.2f, 0.2f, 0.25f))
         );
 
-        // 6-9. Sciana z podluznym oknem (Dol, Gora, Lewo, Prawo)
+        // 6-9. Ściana z podłużnym oknem (dół, góra, lewo, prawo)
         g_scene_objects.push_back(
-            make_quad(L"6. Sciana z Oknem (Panel Dolny)", Vec3(-2.0f, 0.0f, 1.4f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.95f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
+            make_quad(L"6. Ściana z oknem (panel dolny)", Vec3(-2.0f, 0.0f, 1.4f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.95f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
         );
         g_scene_objects.push_back(
-            make_quad(L"7. Sciana z Oknem (Panel Gorny)", Vec3(-2.0f, 1.35f, 1.4f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 1.05f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
+            make_quad(L"7. Ściana z oknem (panel górny)", Vec3(-2.0f, 1.35f, 1.4f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 1.05f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
         );
         g_scene_objects.push_back(
-            make_quad(L"8. Sciana z Oknem (Panel Lewy)", Vec3(-2.0f, 0.95f, 1.4f), Vec3(0.8f, 0.0f, 0.0f), Vec3(0.0f, 0.40f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
+            make_quad(L"8. Ściana z oknem (panel lewy)", Vec3(-2.0f, 0.95f, 1.4f), Vec3(0.8f, 0.0f, 0.0f), Vec3(0.0f, 0.40f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
         );
         g_scene_objects.push_back(
-            make_quad(L"9. Sciana z Oknem (Panel Prawy)", Vec3(1.2f, 0.95f, 1.4f), Vec3(0.8f, 0.0f, 0.0f), Vec3(0.0f, 0.40f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
+            make_quad(L"9. Ściana z oknem (panel prawy)", Vec3(1.2f, 0.95f, 1.4f), Vec3(0.8f, 0.0f, 0.0f), Vec3(0.0f, 0.40f, 0.0f), 0, Vec3(0.72f, 0.70f, 0.68f))
         );
 
-        // 10-14. Sciany zamknietego pokoju (Podloga, Sufit, Lewa, Prawa, Tylna za kamera)
+        // 10-14. Ściany zamkniętego pokoju (podłoga, sufit, lewa, prawa, tylna za kamerą)
         g_scene_objects.push_back(
-            make_quad(L"10. Podloga Pokoju", Vec3(-2.0f, 0.0f, -2.0f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 3.4f), 0, Vec3(0.75f, 0.72f, 0.68f))
+            make_quad(L"10. Podłoga pokoju", Vec3(-2.0f, 0.0f, -2.0f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 3.4f), 0, Vec3(0.75f, 0.72f, 0.68f))
         );
         g_scene_objects.push_back(
-            make_quad(L"11. Sufit Pokoju", Vec3(-2.0f, 2.4f, -2.0f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 3.4f), 0, Vec3(0.82f, 0.82f, 0.82f))
+            make_quad(L"11. Sufit pokoju", Vec3(-2.0f, 2.4f, -2.0f), Vec3(4.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 3.4f), 0, Vec3(0.82f, 0.82f, 0.82f))
         );
         g_scene_objects.push_back(
-            make_quad(L"12. Sciana Lewa", Vec3(-2.0f, 0.0f, -2.0f), Vec3(0.0f, 0.0f, 3.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.75f, 0.35f, 0.32f))
+            make_quad(L"12. Ściana lewa", Vec3(-2.0f, 0.0f, -2.0f), Vec3(0.0f, 0.0f, 3.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.75f, 0.35f, 0.32f))
         );
         g_scene_objects.push_back(
-            make_quad(L"13. Sciana Prawa", Vec3(2.0f, 0.0f, 1.4f), Vec3(0.0f, 0.0f, -3.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.32f, 0.65f, 0.42f))
+            make_quad(L"13. Ściana prawa", Vec3(2.0f, 0.0f, 1.4f), Vec3(0.0f, 0.0f, -3.4f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.32f, 0.65f, 0.42f))
         );
         g_scene_objects.push_back(
-            make_quad(L"14. Sciana Tylna", Vec3(2.0f, 0.0f, -2.0f), Vec3(-4.0f, 0.0f, 0.0f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.68f, 0.68f, 0.72f))
+            make_quad(L"14. Ściana tylna", Vec3(2.0f, 0.0f, -2.0f), Vec3(-4.0f, 0.0f, 0.0f), Vec3(0.0f, 2.4f, 0.0f), 0, Vec3(0.68f, 0.68f, 0.72f))
         );
 
         // Kamera wewnatrz zamknietego pokoju skierowana na okno
@@ -2203,11 +2203,11 @@ void SwitchScene(int scene_id) {
 
 void StartGrabMode() {
     if (g_selected_object_idx < 0 || g_selected_object_idx >= static_cast<int>(g_scene_objects.size())) {
-        SetWindowTextW(g_hStatusLabel, L"Najpierw kliknij obiekt lewym przyciskiem myszy (LPM), aby go wybrac!");
+        SetWindowTextW(g_hStatusLabel, L"Najpierw kliknij obiekt lewym przyciskiem myszy (LPM), aby go wybrać!");
         return;
     }
     if (g_is_rendering.load()) {
-        SetWindowTextW(g_hStatusLabel, L"Renderowanie jest w toku! Kliknij 'Przerwij', aby edytowac pozycje.");
+        SetWindowTextW(g_hStatusLabel, L"Renderowanie jest w toku! Kliknij 'Przerwij', aby edytować pozycję.");
         return;
     }
 
@@ -2241,7 +2241,7 @@ void StartGrabMode() {
     SetFocus(g_hCanvas);
 
     wchar_t status[200];
-    swprintf(status, 200, L"[BLENDER GRAB] %s | Ruch mysza | [X/Y/Z]: Blokada osi | [LPM/Enter]: Zatwierdz | [PPM/Esc]: Anuluj",
+    swprintf(status, 200, L"[BLENDER GRAB] %s | ruch myszą | [X/Y/Z]: blokada osi | [LPM/Enter]: zatwierdź | [PPM/Esc]: anuluj",
              g_scene_objects[g_selected_object_idx].name.c_str());
     SetWindowTextW(g_hStatusLabel, status);
 
@@ -2258,7 +2258,7 @@ void ConfirmGrabMode() {
 
     wchar_t status[200];
     const auto& obj = g_scene_objects[g_selected_object_idx];
-    swprintf(status, 200, L"Zatwierdzono pozycje: [%s] (X: %.2f, Y: %.2f, Z: %.2f)",
+    swprintf(status, 200, L"Zatwierdzono pozycję: [%s] (X: %.2f, Y: %.2f, Z: %.2f)",
              obj.name.c_str(), obj.center.x, obj.center.y, obj.center.z);
     SetWindowTextW(g_hStatusLabel, status);
 
@@ -2274,7 +2274,7 @@ void CancelGrabMode() {
     g_axis_lock = AXIS_NONE;
 
     UpdateObjectFieldsFromSelection(g_selected_object_idx);
-    SetWindowTextW(g_hStatusLabel, L"Anulowano przesuwanie (przywrocono pozycje wyjsciowa).");
+    SetWindowTextW(g_hStatusLabel, L"Anulowano przesuwanie (przywrócono pozycję wyjściową).");
 
     RenderFastPreview();
     InvalidateRect(g_hCanvas, NULL, FALSE);
@@ -2329,7 +2329,7 @@ void StartScaleMode() {
     SetFocus(g_hCanvas);
 
     wchar_t status[200];
-    swprintf(status, 200, L"[BLENDER SCALE] %s | Oddal/przybliz kursor | [LPM/Enter]: Zatwierdz | [PPM/Esc]: Anuluj",
+    swprintf(status, 200, L"[BLENDER SCALE] %s | oddal/przybliż kursor | [LPM/Enter]: zatwierdź | [PPM/Esc]: anuluj",
              g_scene_objects[g_selected_object_idx].name.c_str());
     SetWindowTextW(g_hStatusLabel, status);
 
@@ -2343,7 +2343,7 @@ void ConfirmScaleMode() {
 
     UpdateObjectFieldsFromSelection(g_selected_object_idx);
     wchar_t status[200];
-    swprintf(status, 200, L"Zatwierdzono nowy promien/skale: R=%.2f", g_scene_objects[g_selected_object_idx].radius);
+    swprintf(status, 200, L"Zatwierdzono nowy promień/skalę: R = %.2f", g_scene_objects[g_selected_object_idx].radius);
     SetWindowTextW(g_hStatusLabel, status);
 
     RenderFastPreview();
@@ -2404,7 +2404,7 @@ void ResetCamera() {
     }
     RenderFastPreview();
     InvalidateRect(g_hCanvas, NULL, FALSE);
-    SetWindowTextW(g_hStatusLabel, L"Zresetowano widok kamery 3D do kata poczatkowego sceny.");
+    SetWindowTextW(g_hStatusLabel, L"Zresetowano widok kamery 3D do kąta początkowego sceny.");
 }
 
 void ApplyPositionFromFields() {
@@ -2430,7 +2430,7 @@ void ApplyPositionFromFields() {
     g_selected_object_idx = sel;
 
     wchar_t msg[128];
-    swprintf(msg, 128, L"Zaktualizowano: [%s] (%.2f, %.2f, %.2f) R=%.2f",
+    swprintf(msg, 128, L"Zaktualizowano pozycję: [%s] (%.2f, %.2f, %.2f), R = %.2f",
              g_scene_objects[sel].name.c_str(), x, y, z, r);
     SetWindowTextW(g_hStatusLabel, msg);
 
@@ -2509,10 +2509,9 @@ void StartRendering() {
     // Ustawienie dokładnych wymiarów bufora w pamięci dla renderera
     g_cur_buf_w.store(g_render_width);
     g_cur_buf_h.store(g_render_height);
-    size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
-    g_display_buffer.assign(total_pixels, 0xFF18181B);
-    g_raw_image.assign(total_pixels, Vec3(0, 0, 0));
-    g_sample_counts.assign(total_pixels, 0);
+    g_display_buffer.assign(g_render_width * g_render_height, 0xFF18181B);
+    g_raw_image.assign(g_render_width * g_render_height, Vec3(0, 0, 0));
+    g_sample_counts.assign(g_render_width * g_render_height, 0);
 
     std::vector<Tile> tiles;
     for (int y = 0; y < g_render_height; y += g_tile_size) {
@@ -2540,7 +2539,7 @@ void StartRendering() {
     EnableWindow(g_hBtnGrab, FALSE);
 
     const wchar_t* algoName = L"Standardowy PT";
-    if (g_render_algo == 1) algoName = L"BDPT + Globalna Mapa Fotonow";
+    if (g_render_algo == 1) algoName = L"BDPT + globalna mapa fotonów";
     else if (g_render_algo == 2) algoName = L"Metropolis Light Transport (MLT)";
     else if (g_render_algo == 3) algoName = L"Manifold Exploration (MEMLT / MEPT)";
 
@@ -2548,12 +2547,12 @@ void StartRendering() {
     if (g_render_algo == 2 || g_render_algo == 3) {
         size_t total_mutations = static_cast<size_t>(g_render_width) * g_render_height * spp;
         const wchar_t* tag = (g_render_algo == 3) ? L"MEMLT" : L"MLT";
-        swprintf(statusInit, 160, L"Rozpoczynanie [%s]: %zu mutacji (%d/px, %d fotonow)...",
+        swprintf(statusInit, 160, L"Rozpoczynanie [%s]: %zu mutacji (%d/px, %d fotonów)...",
                  tag, total_mutations, spp, g_photon_count);
         SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 1000));
         SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
     } else {
-        swprintf(statusInit, 160, L"Rozpoczynanie [%s]: %zu kafelkow %dx%d px (%d fotonow)...",
+        swprintf(statusInit, 160, L"Rozpoczynanie [%s]: %zu kafelków %dx%d px (%d fotonów)...",
                  algoName, g_total_tiles, g_tile_size, g_tile_size, g_photon_count);
         SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, g_total_tiles));
         SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
@@ -2569,7 +2568,8 @@ void StartRendering() {
 
     int algo = g_render_algo;
 
-    std::thread([tiles, spp, max_depth, algo, photons, total_pixels]() {
+    std::thread([tiles, spp, max_depth, algo, photons]() {
+        size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
         HittableList world;
         std::vector<Sphere> light_sources;
         std::shared_ptr<ConvexPolyhedron> glass_crystal = nullptr;
@@ -2764,7 +2764,6 @@ void StartRendering() {
             // ================================================================
             // MCMC: MLT (Cline & Egbert 2005) / MEMLT (Jakob & Marschner 2012)
             // ================================================================
-            size_t total_pixels = static_cast<size_t>(g_render_width) * g_render_height;
             {
                 std::lock_guard<std::mutex> lock(g_mlt_mutex);
                 g_mlt_accum.assign(total_pixels, Vec3(0, 0, 0));
@@ -3136,7 +3135,7 @@ void StartRendering() {
             g_is_currently_denoised = false;
 
             if (g_enable_oidn.load()) {
-                SetWindowTextW(g_hStatusLabel, L"Odszumianie obrazu przez sztuczna inteligencje (Intel OIDN)...");
+                SetWindowTextW(g_hStatusLabel, L"Odszumianie obrazu przez sztuczną inteligencję (Intel OIDN)...");
                 std::vector<Vec3> denoised = g_raw_image;
                 if (RunIntelOIDN(denoised, g_render_width, g_render_height)) {
                     g_raw_image = denoised;
@@ -3169,17 +3168,17 @@ void StopRendering() {
     if (g_is_rendering.load()) {
         g_cancel_render.store(true);
         if (g_render_algo == 3) {
-            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie eksploracji rozmaitosci (MEMLT)...");
+            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie eksploracji rozmaitości (MEMLT)...");
         } else if (g_render_algo == 2) {
-            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie lancuchow Markowa (MLT)...");
+            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie łańcuchów Markowa (MLT)...");
         } else {
-            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie watkow kafelkowania...");
+            SetWindowTextW(g_hStatusLabel, L"Zatrzymywanie wątków renderowania...");
         }
     }
 }
 
 void SaveToPNG() {
-    wchar_t filenameW[MAX_PATH] = L"render_kaustyka.png";
+    wchar_t filenameW[MAX_PATH] = L"render-kaustyka.png";
     if (g_hEditFilename) {
         wchar_t buf[MAX_PATH];
         GetWindowTextW(g_hEditFilename, buf, MAX_PATH);
@@ -3268,7 +3267,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                     UpdateObjectFieldsFromSelection(hit_idx);
 
                     wchar_t status[180];
-                    swprintf(status, 180, L"Wybrano: [%s]. Wcisnij 'G', aby przemieszczac, lub 'S', aby skalowac.",
+                    swprintf(status, 180, L"Wybrano: [%s]. Wciśnij 'G', aby przemieścić, lub 'S', aby skalować.",
                              g_scene_objects[hit_idx].name.c_str());
                     SetWindowTextW(g_hStatusLabel, status);
 
@@ -3621,21 +3620,21 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 
                 wchar_t hudText[240];
                 if (g_is_grabbing) {
-                    const wchar_t* axisName = L"Swobodny";
-                    if (g_axis_lock == AXIS_X) axisName = L"Os X (Czerwona)";
-                    else if (g_axis_lock == AXIS_Y) axisName = L"Os Y (Zielona)";
-                    else if (g_axis_lock == AXIS_Z) axisName = L"Os Z (Niebieska)";
+                    const wchar_t* axisName = L"swobodny";
+                    if (g_axis_lock == AXIS_X) axisName = L"oś X (czerwona)";
+                    else if (g_axis_lock == AXIS_Y) axisName = L"oś Y (zielona)";
+                    else if (g_axis_lock == AXIS_Z) axisName = L"oś Z (niebieska)";
 
-                    swprintf(hudText, 240, L" ✋ [BLENDER GRAB] %s | Os: %s | [X/Y/Z]: Zmien os | [LPM/Enter]: Zatwierdz | [PPM/Esc]: Anuluj",
+                    swprintf(hudText, 240, L" ✋ [BLENDER GRAB] %s | Oś: %s | [X/Y/Z]: zmiana osi | [LPM/Enter]: zatwierdź | [PPM/Esc]: anuluj",
                              g_scene_objects[g_selected_object_idx].name.c_str(), axisName);
                     SetTextColor(hdc, RGB(255, 215, 0));
                 } else if (g_is_scaling) {
-                    swprintf(hudText, 240, L" 📐 [BLENDER SCALE] %s | R=%.2f | Ruch mysza | [LPM/Enter]: Zatwierdz | [PPM/Esc]: Anuluj",
+                    swprintf(hudText, 240, L" 📐 [BLENDER SCALE] %s | R = %.2f | ruch myszą | [LPM/Enter]: zatwierdź | [PPM/Esc]: anuluj",
                              g_scene_objects[g_selected_object_idx].name.c_str(), g_scene_objects[g_selected_object_idx].radius);
                     SetTextColor(hdc, RGB(80, 220, 255));
                 } else {
-                    swprintf(hudText, 240, L" 🎮 [BLENDER 3D] LPM: Wybierz | G: Przesun | S: Skaluj | SPM/Alt+LPM: Obrot | Scroll: Zoom | Shift+SPM: Pan | F: Siatka",
-                             (g_selected_object_idx >= 0 ? g_scene_objects[g_selected_object_idx].name.c_str() : L"Brak"));
+                    swprintf(hudText, 240, L" 🎮 [BLENDER 3D] LPM: wybór | G: przesuń | S: skaluj | SPM / Alt+LPM: obrót | Scroll: zoom | Shift+SPM: przesuwanie widoku | F: siatka",
+                             (g_selected_object_idx >= 0 ? g_scene_objects[g_selected_object_idx].name.c_str() : L"brak"));
                     SetTextColor(hdc, RGB(210, 225, 245));
                 }
 
@@ -3647,7 +3646,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 DeleteObject(hTopBg);
                 SetTextColor(hdc, RGB(180, 200, 230));
                 wchar_t topText[120];
-                swprintf(topText, 120, L"  Widok 3D: Plynny cieniowany | Siatka podloza: [%s]  ", g_show_floor_grid ? L"ON" : L"OFF");
+                swprintf(topText, 120, L"  Widok 3D: płynny cieniowany | Siatka podłoża: [%s]  ", g_show_floor_grid ? L"WŁ" : L"WYŁ");
                 DrawTextW(hdc, topText, -1, &topRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
                 SelectObject(hdc, hOldFont);
@@ -3826,8 +3825,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int sideX = 835;
             int curY = 15;
 
-            // 1. Grupa: Scena 3D & Import OBJ
-            g_hGroupScene = CreateWindowW(L"BUTTON", L" Wybor Sceny 3D & Import Geometrii ",
+            // 1. Grupa: Scena 3D & Import Geometrii
+            g_hGroupScene = CreateWindowW(L"BUTTON", L" Wybór sceny 3D & Import Geometrii ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 sideX, curY, 390, 82, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupScene, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -3839,8 +3838,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hComboScene = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
                 sideX + 100, curY - 2, 275, 150, hWnd, (HMENU)IDC_COMBO_SCENE, nullptr, nullptr);
             SendMessage(g_hComboScene, WM_SETFONT, (WPARAM)hFont, TRUE);
-            SendMessage(g_hComboScene, CB_ADDSTRING, 0, (LPARAM)L"1. Krysztal Szklany & Kule (Kaustyka)");
-            SendMessage(g_hComboScene, CB_ADDSTRING, 0, (LPARAM)L"2. Zamkniety Pokoj ze Szczelina (Manifold)");
+            SendMessage(g_hComboScene, CB_ADDSTRING, 0, (LPARAM)L"1. Kryształ szklany i kule (kaustyka)");
+            SendMessage(g_hComboScene, CB_ADDSTRING, 0, (LPARAM)L"2. Zamknięty pokój ze szczeliną (Manifold)");
             SendMessage(g_hComboScene, CB_SETCURSEL, 0, 0);
 
             curY += 26;
@@ -3854,7 +3853,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             curY += 44;
             // 2. Grupa: Parametry renderowania & Algorytm
-            g_hGroupRender = CreateWindowW(L"BUTTON", L" Parametry renderowania & Algorytm ",
+            g_hGroupRender = CreateWindowW(L"BUTTON", L" Parametry renderowania i algorytm ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 sideX, curY, 390, 252, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupRender, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -3867,9 +3866,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 sideX + 115, curY - 2, 260, 150, hWnd, (HMENU)IDC_COMBO_ALGO, nullptr, nullptr);
             SendMessage(g_hComboAlgo, WM_SETFONT, (WPARAM)hFont, TRUE);
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Standardowy Path Tracing (PT)");
-            SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"BDPT (Globalna Mapa Fotonow - Krysztal)");
+            SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"BDPT (globalna mapa fotonów – kryształ)");
             SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Metropolis Light Transport (MLT)");
-            SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Manifold Exploration (MEMLT - Rozmaitosci)");
+            SendMessage(g_hComboAlgo, CB_ADDSTRING, 0, (LPARAM)L"Manifold Exploration (MEMLT – rozmaitości)");
             SendMessage(g_hComboAlgo, CB_SETCURSEL, 1, 0);
 
             curY += 26;
@@ -3880,60 +3879,60 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 sideX + 115, curY - 2, 85, 22, hWnd, (HMENU)IDC_EDIT_PHOTONS, nullptr, nullptr);
             SendMessage(g_hEditPhotons, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hLblPhotHint = CreateWindowW(L"STATIC", L"(np. 20000 - 150000)", WS_CHILD | WS_VISIBLE, sideX + 210, curY, 165, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblPhotHint = CreateWindowW(L"STATIC", L"(np. 20 000 – 150 000)", WS_CHILD | WS_VISIBLE, sideX + 210, curY, 165, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblPhotHint, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 26;
-            g_hLblRes = CreateWindowW(L"STATIC", L"Rozdzielczosc:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 95, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblRes = CreateWindowW(L"STATIC", L"Rozdzielczość:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 95, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblRes, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hComboRes = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
                 sideX + 115, curY - 2, 260, 200, hWnd, (HMENU)IDC_COMBO_RES, nullptr, nullptr);
             SendMessage(g_hComboRes, WM_SETFONT, (WPARAM)hFont, TRUE);
-            SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"640 x 360  (Bardzo szybki podglad)");
-            SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"800 x 450  (Standardowy podglad)");
+            SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"640 x 360  (bardzo szybki podgląd)");
+            SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"800 x 450  (standardowy podgląd)");
             SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"960 x 540  (qHD)");
             SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"1280 x 720 (HD 720p)");
             SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"1920 x 1080 (Full HD 1080p)");
-            SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"Niestandardowa (wpisz ponizej)");
+            SendMessage(g_hComboRes, CB_ADDSTRING, 0, (LPARAM)L"Niestandardowa (wpisz poniżej)");
             SendMessage(g_hComboRes, CB_SETCURSEL, 1, 0);
 
             curY += 26;
-            g_hLblW = CreateWindowW(L"STATIC", L"Szerokosc W:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblW = CreateWindowW(L"STATIC", L"Szerokość (W):", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblW, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditResW = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"800", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 100, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_RES_W, nullptr, nullptr);
             SendMessage(g_hEditResW, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hLblH = CreateWindowW(L"STATIC", L"Wysokosc H:", WS_CHILD | WS_VISIBLE, sideX + 190, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblH = CreateWindowW(L"STATIC", L"Wysokość (H):", WS_CHILD | WS_VISIBLE, sideX + 190, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblH, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditResH = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"450", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 270, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_RES_H, nullptr, nullptr);
             SendMessage(g_hEditResH, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 26;
-            g_hLblTile = CreateWindowW(L"STATIC", L"Kafelek (Tiling):", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 95, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblTile = CreateWindowW(L"STATIC", L"Rozmiar kafelka:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 95, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblTile, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hComboTile = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
                 sideX + 115, curY - 2, 260, 150, hWnd, (HMENU)IDC_COMBO_TILE, nullptr, nullptr);
             SendMessage(g_hComboTile, WM_SETFONT, (WPARAM)hFont, TRUE);
-            SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"16 x 16 px (Drobny - bez szwow)");
-            SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"32 x 32 px (Standardowy - optymalny)");
-            SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"64 x 64 px (Duze kafelki)");
+            SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"16 x 16 px (drobny – bez szwów)");
+            SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"32 x 32 px (standardowy – optymalny)");
+            SendMessage(g_hComboTile, CB_ADDSTRING, 0, (LPARAM)L"64 x 64 px (duże kafelki)");
             SendMessage(g_hComboTile, CB_SETCURSEL, 0, 0);
 
             curY += 26;
-            g_hLblSPP = CreateWindowW(L"STATIC", L"Probki (SPP):", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblSPP = CreateWindowW(L"STATIC", L"Próbki (SPP):", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblSPP, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditSPP = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"64", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 100, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_SPP, nullptr, nullptr);
             SendMessage(g_hEditSPP, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hLblDepth = CreateWindowW(L"STATIC", L"Maks. odbic:", WS_CHILD | WS_VISIBLE, sideX + 190, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblDepth = CreateWindowW(L"STATIC", L"Maks. odbić:", WS_CHILD | WS_VISIBLE, sideX + 190, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblDepth, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditDepth = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"16", WS_CHILD | WS_VISIBLE | ES_NUMBER, sideX + 270, curY - 2, 65, 22, hWnd, (HMENU)IDC_EDIT_DEPTH, nullptr, nullptr);
             SendMessage(g_hEditDepth, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 26;
-            g_hChkDenoise = CreateWindowW(L"BUTTON", L"Intel OIDN AI Denoise", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            g_hChkDenoise = CreateWindowW(L"BUTTON", L"Odszumianie AI (Intel OIDN)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                 sideX + 15, curY, 230, 22, hWnd, (HMENU)IDC_CHK_DENOISE, nullptr, nullptr);
             SendMessage(g_hChkDenoise, WM_SETFONT, (WPARAM)hFont, TRUE);
             SendMessage(g_hChkDenoise, BM_SETCHECK, BST_CHECKED, 0);
@@ -3953,8 +3952,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
             curY += 46;
 
-            // 3. Grupa: Obiekt, Pozycja & Material
-            g_hGroupObj = CreateWindowW(L"BUTTON", L" Edycja Obiektu, Pozycji (Blender 3D) & Materialu ",
+            // 3. Grupa: Obiekt, Pozycja & Materiał
+            g_hGroupObj = CreateWindowW(L"BUTTON", L" Edycja obiektu, pozycji (Blender 3D) i materiału ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 sideX, curY, 390, 280, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupObj, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -3973,7 +3972,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditPosX = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.00", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 75, 22, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hEditPosX, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hLblRadius = CreateWindowW(L"STATIC", L"Promien R:", WS_CHILD | WS_VISIBLE, sideX + 185, curY, 70, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblRadius = CreateWindowW(L"STATIC", L"Promień (R):", WS_CHILD | WS_VISIBLE, sideX + 185, curY, 70, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblRadius, WM_SETFONT, (WPARAM)hFont, TRUE);
             g_hEditRadius = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.65", WS_CHILD | WS_VISIBLE, sideX + 260, curY - 2, 80, 22, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hEditRadius, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -3984,7 +3983,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditPosY = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.00", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 75, 22, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hEditPosY, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hBtnApplyPos = CreateWindowW(L"BUTTON", L"Zastosuj pozycje", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            g_hBtnApplyPos = CreateWindowW(L"BUTTON", L"Zastosuj pozycję", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 sideX + 185, curY - 2, 185, 24, hWnd, (HMENU)IDC_BTN_APPLY_POS, nullptr, nullptr);
             SendMessage(g_hBtnApplyPos, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -3994,7 +3993,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditPosZ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.00", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 75, 22, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hEditPosZ, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hBtnGrab = CreateWindowW(L"BUTTON", L"✋ Przesun w 3D (G)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            g_hBtnGrab = CreateWindowW(L"BUTTON", L"✋ Przesuń w 3D (G)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 sideX + 185, curY - 2, 185, 24, hWnd, (HMENU)IDC_BTN_GRAB, nullptr, nullptr);
             SendMessage(g_hBtnGrab, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -4003,22 +4002,22 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 sideX + 185, curY - 2, 185, 24, hWnd, (HMENU)IDC_BTN_RESET_CAM, nullptr, nullptr);
             SendMessage(g_hBtnResetCam, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            // Material Editor wewnatrz grupy obiektow:
+            // Material Editor wewnątrz grupy obiektów:
             curY += 28;
-            g_hLblMatType = CreateWindowW(L"STATIC", L"Material:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 90, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblMatType = CreateWindowW(L"STATIC", L"Materiał:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 90, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblMatType, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hComboMatType = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
                 sideX + 110, curY - 2, 265, 150, hWnd, (HMENU)IDC_COMBO_MAT_TYPE, nullptr, nullptr);
             SendMessage(g_hComboMatType, WM_SETFONT, (WPARAM)hFont, TRUE);
-            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Lambertian (Matowy / Rozproszony)");
-            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Metal (Zwierciadlany / Lustro)");
-            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Dielectric (Szklo / Krysztal)");
-            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"DiffuseLight (Emisja Swiatla)");
+            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Lambertian (matowy / rozproszony)");
+            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Metal (zwierciadlany / lustro)");
+            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"Dielectric (szkło / kryształ)");
+            SendMessage(g_hComboMatType, CB_ADDSTRING, 0, (LPARAM)L"DiffuseLight (emisja światła)");
             SendMessage(g_hComboMatType, CB_SETCURSEL, 0, 0);
 
             curY += 25;
-            g_hLblMatCol = CreateWindowW(L"STATIC", L"RGB / Param:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblMatCol = CreateWindowW(L"STATIC", L"RGB / parametr:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 75, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblMatCol, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             g_hEditMatR = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.85", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 50, 22, hWnd, (HMENU)IDC_EDIT_MAT_R, nullptr, nullptr);
@@ -4040,11 +4039,11 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hEditMatDisp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0.020", WS_CHILD | WS_VISIBLE, sideX + 90, curY - 2, 75, 22, hWnd, (HMENU)IDC_EDIT_MAT_DISP, nullptr, nullptr);
             SendMessage(g_hEditMatDisp, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hLblMatDispHint = CreateWindowW(L"STATIC", L"(0.00=biel, 0.05=tecza)", WS_CHILD | WS_VISIBLE, sideX + 175, curY, 195, 20, hWnd, nullptr, nullptr, nullptr);
+            g_hLblMatDispHint = CreateWindowW(L"STATIC", L"(0.00 = brak, 0.05 = pryzmat)", WS_CHILD | WS_VISIBLE, sideX + 175, curY, 195, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblMatDispHint, WM_SETFONT, (WPARAM)hFont, TRUE);
 
             curY += 26;
-            g_hBtnApplyMat = CreateWindowW(L"BUTTON", L"🎨 Zastosuj Material do Wybranego Obiektu", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            g_hBtnApplyMat = CreateWindowW(L"BUTTON", L"🎨 Zastosuj materiał do wybranego obiektu", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 sideX + 15, curY, 360, 26, hWnd, (HMENU)IDC_BTN_APPLY_MAT, nullptr, nullptr);
             SendMessage(g_hBtnApplyMat, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -4060,7 +4059,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hLblFile = CreateWindowW(L"STATIC", L"Nazwa pliku:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblFile, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hEditFilename = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"render_kaustyka.png", WS_CHILD | WS_VISIBLE,
+            g_hEditFilename = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"render-kaustyka.png", WS_CHILD | WS_VISIBLE,
                 sideX + 100, curY - 2, 275, 22, hWnd, (HMENU)IDC_EDIT_FILENAME, nullptr, nullptr);
             SendMessage(g_hEditFilename, WM_SETFONT, (WPARAM)hFont, TRUE);
 
@@ -4074,7 +4073,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
                 15, 480, g_canvas_view_width, 22, hWnd, (HMENU)IDC_PROGRESS_BAR, nullptr, nullptr);
 
-            g_hStatusLabel = CreateWindowW(L"STATIC", L"Gotowy. Pelna kontrola 3D: LPM=Wybierz, G=Przesun, S=Skaluj, SPM/Alt+LPM=Obrot, Scroll=Zoom.",
+            g_hStatusLabel = CreateWindowW(L"STATIC", L"Gotowy. Pełna kontrola 3D: LPM = wybór, G = przesuń, S = skaluj, SPM / Alt+LPM = obrót, Scroll = zoom.",
                 WS_CHILD | WS_VISIBLE,
                 15, 510, g_canvas_view_width + 390, 24, hWnd, (HMENU)IDC_STATUS_LABEL, nullptr, nullptr);
             SendMessage(g_hStatusLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -4130,7 +4129,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
                         const wchar_t* algoLabel = (g_render_algo == 3) ? L"Manifold Exploration MEMLT" : L"Metropolis Light Transport";
                         wchar_t status[200];
-                        swprintf(status, 200, L"Renderowanie [%s]... %d%% (%zu/%zu mutacji) [Czas: %.1f s]",
+                        swprintf(status, 200, L"Renderowanie [%s]... %d%% (%zu/%zu mutacji) [czas: %.1f s]",
                                  algoLabel, percent, done, total, elapsed.count());
                         SetWindowTextW(g_hStatusLabel, status);
                     } else {
@@ -4138,10 +4137,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         SendMessage(g_hProgressBar, PBM_SETPOS, done, 0);
 
                         int percent = (g_total_tiles > 0) ? static_cast<int>(done * 100 / g_total_tiles) : 0;
-                        const wchar_t* modeTag = (g_render_algo == 1) ? L"BDPT + Mapa Fotonow" : L"PT";
+                        const wchar_t* modeTag = (g_render_algo == 1) ? L"BDPT + mapa fotonów" : L"PT";
 
                         wchar_t status[180];
-                        swprintf(status, 180, L"Renderowanie [%s]... %d%% (%zu/%zu kafelkow) [Czas: %.1f s, Fotony: %d]",
+                        swprintf(status, 180, L"Renderowanie [%s]... %d%% (%zu/%zu kafelków) [czas: %.1f s, fotony: %d]",
                                  modeTag, percent, done, g_total_tiles, elapsed.count(), g_photon_count);
                         SetWindowTextW(g_hStatusLabel, status);
                     }
@@ -4158,7 +4157,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         std::chrono::duration<double> elapsed = now - g_render_start_time;
 
                         const wchar_t* modeTag = (g_render_algo == 3) ? L"MEMLT" : ((g_render_algo == 2) ? L"MLT" : ((g_render_algo == 1) ? L"BDPT" : L"PT"));
-                        const wchar_t* oidnTag = g_is_currently_denoised ? L" [Intel OIDN: ON]" : L" [OIDN: OFF]";
+                        const wchar_t* oidnTag = g_is_currently_denoised ? L" [Intel OIDN: włączony]" : L" [OIDN: wyłączony]";
                         wchar_t status[220];
 
                         if (g_render_algo == 2 || g_render_algo == 3) {
@@ -4168,7 +4167,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                             if (g_cancel_render.load()) {
                                 swprintf(status, 220, L"[%s] Renderowanie przerwane na %zu/%zu mutacjach.", modeTag, done, total);
                             } else {
-                                swprintf(status, 220, L"[%s] Renderowanie ukonczone w %.2f s! (%zu mutacji, %dx%d px)%s.",
+                                swprintf(status, 220, L"[%s] Renderowanie ukończone w %.2f s! (%zu mutacji, %dx%d px)%s.",
                                          modeTag, elapsed.count(), done, g_render_width, g_render_height, oidnTag);
                             }
                         } else {
@@ -4177,7 +4176,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                             if (g_cancel_render.load()) {
                                 swprintf(status, 220, L"[%s] Renderowanie przerwane na kafelku %zu/%zu.", modeTag, done, g_total_tiles);
                             } else {
-                                swprintf(status, 220, L"[%s] Renderowanie ukonczone w %.2f s! Rozdzielczosc: %dx%d px%s.",
+                                swprintf(status, 220, L"[%s] Renderowanie ukończone w %.2f s! Rozdzielczość: %dx%d px%s.",
                                          modeTag, elapsed.count(), g_render_width, g_render_height, oidnTag);
                             }
                         }
@@ -4211,10 +4210,10 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 int sel = static_cast<int>(SendMessage(g_hComboAlgo, CB_GETCURSEL, 0, 0));
                 g_render_algo = sel;
                 if (sel == 2 || sel == 3) {
-                    SetWindowTextW(g_hLblSPP, L"Mutacje/px:");
+                    SetWindowTextW(g_hLblSPP, L"Mutacje na piksel:");
                     EnableWindow(g_hComboTile, FALSE);
                 } else {
-                    SetWindowTextW(g_hLblSPP, L"Probki (SPP):");
+                    SetWindowTextW(g_hLblSPP, L"Próbki (SPP):");
                     EnableWindow(g_hComboTile, TRUE);
                 }
             }
@@ -4266,7 +4265,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     }
                     InvalidateRect(g_hCanvas, NULL, FALSE);
                     wchar_t statusBuf[180];
-                    swprintf(statusBuf, 180, L"Podglad przelaczony: %s", g_is_currently_denoised ? L"Intel OIDN Aktywny" : L"Surowy (Bez odszumiania)");
+                    swprintf(statusBuf, 180, L"Podgląd przełączony: %s", g_is_currently_denoised ? L"Intel OIDN aktywny" : L"surowy (bez odszumiania)");
                     SetWindowTextW(g_hStatusLabel, statusBuf);
                 }
             }
@@ -4295,9 +4294,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                             g_display_buffer[i] = (ib) | (ig << 8) | (ir << 16) | (0xFF << 24);
                         }
                         InvalidateRect(g_hCanvas, NULL, FALSE);
-                        SetWindowTextW(g_hStatusLabel, L"Odszumianie ukonczone pomyslnie! (Intel OIDN)");
+                        SetWindowTextW(g_hStatusLabel, L"Odszumianie ukończone pomyślnie! (Intel OIDN)");
                     } else {
-                        SetWindowTextW(g_hStatusLabel, L"Blad podczas odszumiania OIDN.");
+                        SetWindowTextW(g_hStatusLabel, L"Błąd podczas odszumiania OIDN.");
                     }
                 }
             }
