@@ -1814,7 +1814,7 @@ void ExportSceneToOBJ() {
         return;
     }
 
-    wchar_t filename[MAX_PATH] = L"scena-eksport.obj";
+    wchar_t filename[MAX_PATH] = L"scena_eksport.obj";
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(OPENFILENAMEW);
     ofn.hwndOwner = g_hWnd;
@@ -3178,7 +3178,7 @@ void StopRendering() {
 }
 
 void SaveToPNG() {
-    wchar_t filenameW[MAX_PATH] = L"render-kaustyka.png";
+    wchar_t filenameW[MAX_PATH] = L"render_kaustyka.png";
     if (g_hEditFilename) {
         wchar_t buf[MAX_PATH];
         GetWindowTextW(g_hEditFilename, buf, MAX_PATH);
@@ -3825,8 +3825,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int sideX = 835;
             int curY = 15;
 
-            // 1. Grupa: Scena 3D & Import Geometrii
-            g_hGroupScene = CreateWindowW(L"BUTTON", L" Wybór sceny 3D & Import Geometrii ",
+            // 1. Grupa: Scena 3D - import geometrii
+            g_hGroupScene = CreateWindowW(L"BUTTON", L" Wybór sceny 3D - import geometrii ",
                 WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                 sideX, curY, 390, 82, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hGroupScene, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -4059,7 +4059,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_hLblFile = CreateWindowW(L"STATIC", L"Nazwa pliku:", WS_CHILD | WS_VISIBLE, sideX + 15, curY, 80, 20, hWnd, nullptr, nullptr, nullptr);
             SendMessage(g_hLblFile, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-            g_hEditFilename = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"render-kaustyka.png", WS_CHILD | WS_VISIBLE,
+            g_hEditFilename = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"render_kaustyka.png", WS_CHILD | WS_VISIBLE,
                 sideX + 100, curY - 2, 275, 22, hWnd, (HMENU)IDC_EDIT_FILENAME, nullptr, nullptr);
             SendMessage(g_hEditFilename, WM_SETFONT, (WPARAM)hFont, TRUE);
 
